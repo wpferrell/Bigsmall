@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+
+# Build artifacts
+dist/
+build/
+wheels/
+*.whl
+*.tar.gz
+
+# Compressed model files (too large for git)
+*.bs
+*.safetensors
+
+# Local model directories
+models/
+gpt2_bs/
+*_bs/
+
+# Environments
+.env
+.env.*
+venv/
+env/
+.venv/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp
+test_p.log
+claude_launch.log
+
+# Local-only Claude/run helpers
+.claude/
+run_claude.bat

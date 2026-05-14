@@ -20,7 +20,9 @@ setup(
     packages=find_packages(include=["bigsmall", "bigsmall.*"]),
     install_requires=[
         "numpy>=1.24",
+        "constriction>=0.4",
         "zstandard>=0.21",
+        "blosc2>=2.0",
         "safetensors>=0.4",
         "huggingface-hub>=0.20",
         "tqdm>=4.0",

@@ -25,17 +25,39 @@ wheels/
 # Compressed model files (too large for git)
 *.bs
 *.safetensors
+"ù.parquet
+*.jsonl
 
 # Local model directories
 models/
 gpt2_bs/
 *_bs/
+checkpoints/
 
-# Environments
+# Internal docs - never publish
+CORE_ENGINE_FINAL.md
+CLAUDE.md
+UNIVERSAL_STATE.md
+SESSION_*.md
+*_NOTES.md
+*_INTERNAL.md
+
+# Research scripts - never publish
+experiments/
+research/
+cc*.py
+ck*.py
+
+# Credentials/secrets
 .env
 .env.*
+*.env
+secrets.yml
+.secrets
+
+# Environments
 venv/
-env/
+envˆ/
 .venv/
 
 # IDE / OS

@@ -18,7 +18,7 @@ HuggingFace Hub round-trip (Phase 4):
 Streaming loader (Phase 4 cont.):
     bigsmall.StreamingLoader(path, device="cuda")   - layer-by-layer decompression
 """
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from .encoder import compress, compress_delta
 from .decoder import decompress, decompress_delta, load

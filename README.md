@@ -135,6 +135,33 @@ with bigsmall.StreamingLoader("wpferrell/mistral-7b-instruct-bigsmall", device="
 
 ---
 
+## vLLM integration
+
+```bash
+pip install bigsmall[vllm]
+```
+
+```python
+import bigsmall
+
+# Serve directly from HuggingFace -- decompresses automatically
+bigsmall.vllm_serve("wpferrell/mistral-7b-instruct-bigsmall", port=8000)
+```
+
+Or decompress first and use vLLM normally:
+
+```python
+out_dir = bigsmall.vllm_decompress("wpferrell/mistral-7b-instruct-bigsmall")
+
+from vllm import LLM
+llm = LLM(model=str(out_dir))
+outputs = llm.generate("Tell me about lossless compression.")
+```
+
+`vllm_decompress` and `vllm_serve` both accept a HuggingFace repo ID, a local directory of `.bs` shards, or a single `.bs` file.
+
+---
+
 ## CLI
 
 ```bash

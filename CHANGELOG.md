@@ -1,5 +1,9 @@
 # Changelog
 
+## [2.0.1] - 2026-05-15
+### Added
+- vLLM integration: `bigsmall.vllm_serve()` and `bigsmall.vllm_decompress()` now accept HuggingFace repo IDs and multi-shard models
+
 ## [2.0.0] - 2026-05-15
 ### Added
 - AutoModel transparent hook — `bigsmall.install_hook()` makes all `AutoModel.from_pretrained()` calls work with BigSmall-compressed repos

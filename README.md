@@ -181,7 +181,9 @@ bigsmall decompress delta.bs --base base.safetensors -o reconstructed.safetensor
 
 ## Paper
 
-Full technical paper with floor proofs across all five float formats: **preprint coming soon**.
+**[BigSmall: Lossless Neural Network Weight Compression at the Joint Entropy Floor](https://github.com/wpferrell/Bigsmall/blob/main/paper.pdf)**
+
+Full technical paper covering the joint entropy floor proof, per-tensor arithmetic codec, streaming loader architecture, and benchmarks across all five float formats. Preprint — arXiv submission in progress.
 
 ---
 

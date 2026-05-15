@@ -14,11 +14,11 @@ pip install bigsmall
 import bigsmall
 
 # Load a compressed model -- same as the original, smaller footprint
-state_dict = bigsmall.from_pretrained("wpferrell/mistral-7b-bigsmall")
+state_dict = bigsmall.from_pretrained("wpferrell/mistral-7b-instruct-bigsmall")
 model.load_state_dict(state_dict)
 
 # Or stream it layer-by-layer -- runs models bigger than your RAM
-with bigsmall.StreamingLoader("mistral.bs", device="cuda") as loader:
+with bigsmall.StreamingLoader("wpferrell/mistral-7b-instruct-bigsmall", device="cuda") as loader:
     for layer_idx, tensors in loader.iter_layers():
         # one layer in memory at a time, previous layer already freed
         pass
@@ -104,12 +104,23 @@ state_dict = bigsmall.from_pretrained("you/mistral-7b-bigsmall")
 
 ---
 
+## Pre-compressed models
+
+Ready to use -- no compression step needed:
+
+| Model | HuggingFace | Original | Compressed |
+|-------|-------------|----------|------------|
+| Mistral 7B Instruct v0.3 | [wpferrell/mistral-7b-instruct-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-bigsmall) | 14.2 GB | 9.3 GB |
+| GPT-2 117M | [wpferrell/gpt2-bigsmall](https://huggingface.co/wpferrell/gpt2-bigsmall) | 548 MB | 414 MB |
+
+---
+
 ## Streaming loader
 
 The streaming loader lets you run models that don't fit in RAM or VRAM. It decompresses one transformer layer at a time, directly into the target device, and frees the previous layer before loading the next. Peak memory is `embeddings + one layer` -- typically under 2 GB even for 7B models.
 
 ```python
-with bigsmall.StreamingLoader("mistral.bs", device="cuda") as loader:
+with bigsmall.StreamingLoader("wpferrell/mistral-7b-instruct-bigsmall", device="cuda") as loader:
     print(f"{loader.layer_count()} layers")
 
     # Load embeddings and non-layer tensors upfront (small)
@@ -170,7 +181,7 @@ bigsmall decompress delta.bs --base base.safetensors -o reconstructed.safetensor
 
 ## Paper
 
-Full technical paper with floor proofs across all five float formats: **coming soon (arXiv preprint in preparation)**.
+Full technical paper with floor proofs across all five float formats: **preprint coming soon**.
 
 ---
 

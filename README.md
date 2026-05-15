@@ -155,13 +155,16 @@ bigsmall decompress delta.bs --base base.safetensors -o reconstructed.safetensor
 
 ## Comparison
 
-| Tool | BF16 Ratio | FP32 Ratio | Inference Overhead | Hardware |
-|------|------------|------------|-------------------|---------|
-| [ZipNN](https://arxiv.org/abs/2411.05239) | 67% | 83% | None (load-time only) | CPU |
-| [DFloat11](https://arxiv.org/abs/2504.11651) | ~70% | BF16 only | ~2x at batch=1 | CUDA only |
-| **BigSmall** | **59.8%** | **75.5%** | **None** | **CPU + any GPU** |
+| Tool | BF16 Ratio | FP32 Ratio | Inference Overhead | Hardware | Venue |
+|------|------------|------------|-------------------|---------|-------|
+| [ZipNN](https://arxiv.org/abs/2411.05239) | 67% | 83% | None (load-time only) | CPU | arXiv '24 |
+| [DFloat11](https://arxiv.org/abs/2504.11651) | ~70% | BF16 only | ~2x at batch=1 | CUDA | NeurIPS '25 |
+| [ZipServ](https://arxiv.org/abs/2603.17435) | ~70% | BF16 only | 1.22x faster | GDDR GPU | ASPLOS '26 |
+| [Unweight](https://research.cloudflare.com/papers/unweight-2026.pdf) | ~80%* | BF16 only | None | H100/H200 | Tech Report |
+| **BigSmall** | **65.6%** | **75.5%** | **None** | **CPU + any GPU** | — |
 
-*Lower ratio = better compression. BigSmall numbers measured on Mistral 7B (BF16) and GPT-2 (FP32), md5 verified lossless.*
+*Lower ratio = better compression. BigSmall BF16 ratio measured on Mistral 7B, FP32 on GPT-2, md5 verified lossless.*
+*\*Unweight compresses MLP weights only (~20% total model size reduction).*
 
 ---
 

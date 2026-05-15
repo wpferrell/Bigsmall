@@ -21,6 +21,17 @@ from .codecs import bf16, fp32, fp16, fp8, fp4, special as special_codec, generi
 from . import container, formats, tensor_analysis as ta
 
 
+def _maybe_tqdm(iterable, *, total=None, desc="", disable=False):
+    """Wrap an iterable in tqdm if available; otherwise return it unchanged."""
+    if disable:
+        return iterable
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return iterable
+    return tqdm(iterable, total=total, desc=desc, unit="tensor", dynamic_ncols=True)
+
+
 _FORMAT_CODECS = {
     "fp32": fp32,
     "bf16": bf16,
@@ -216,7 +227,7 @@ def _encode_special(t: dict, kind: str) -> tuple[bytes, str, dict]:
 
 
 def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
-             workers: Optional[int] = None) -> str:
+             workers: Optional[int] = None, progress: bool = True) -> str:
     """Compress a safetensors file into a .bs container.
 
     Args:
@@ -263,16 +274,48 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
             continue
         jobs.append((i, kind, t["fmt"], t["raw"], t["item_bytes"], t["shape"]))
 
+    pbar = None
+    if progress:
+        try:
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=len(tensors), desc="compress", unit="tensor",
+                        dynamic_ncols=True)
+        except ImportError:
+            pbar = None
+
+    raw_bytes_seen = 0
+    compressed_bytes_seen = 0
+
+    def _account_progress(idx, blob, t):
+        nonlocal raw_bytes_seen, compressed_bytes_seen
+        if pbar is None:
+            return
+        raw_bytes_seen += len(t["raw"])
+        compressed_bytes_seen += len(blob)
+        ratio = (compressed_bytes_seen / raw_bytes_seen * 100.0) if raw_bytes_seen else 0.0
+        pbar.set_postfix_str(f"{t['name'][:48]} ratio={ratio:.1f}%")
+        pbar.update(1)
+
+    # Account tied entries (no compute) upfront
+    for i, t in enumerate(tensors):
+        if decisions[i]["kind"] == "tied":
+            _account_progress(i, b"", t)
+
     if workers <= 1 or len(jobs) <= 1:
         # Serial path - avoid process pool overhead for tiny models / tests
         for job in jobs:
             idx, blob, codec_name, extras, special_label = _encode_worker(job)
             encoded[idx] = (blob, codec_name, extras, special_label)
+            _account_progress(idx, blob, tensors[idx])
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             for fut in as_completed([pool.submit(_encode_worker, j) for j in jobs]):
                 idx, blob, codec_name, extras, special_label = fut.result()
                 encoded[idx] = (blob, codec_name, extras, special_label)
+                _account_progress(idx, blob, tensors[idx])
+
+    if pbar is not None:
+        pbar.close()
 
     # Assemble container in original tensor order so .bs layout is deterministic
     data_buf = io.BytesIO()
@@ -327,7 +370,8 @@ def _delta_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
 
 def compress_delta(finetune_src: str | Path, base_src: str | Path,
                    dst: str | Path, mode: str = "balanced",
-                   workers: Optional[int] = None) -> str:
+                   workers: Optional[int] = None,
+                   progress: bool = True) -> str:
     """Compress a fine-tuned model as the delta against a base model.
 
     XOR base raw bytes with finetune raw bytes per tensor. The XOR has many
@@ -371,15 +415,44 @@ def compress_delta(finetune_src: str | Path, base_src: str | Path,
         jobs.append((i, is_delta, payload, t["fmt"]))
 
     encoded: dict[int, tuple[bytes, str, dict, str | None]] = {}
+
+    pbar = None
+    if progress:
+        try:
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=len(jobs), desc="delta", unit="tensor",
+                        dynamic_ncols=True)
+        except ImportError:
+            pbar = None
+
+    raw_bytes_seen = 0
+    compressed_bytes_seen = 0
+
+    def _account(idx, blob):
+        nonlocal raw_bytes_seen, compressed_bytes_seen
+        if pbar is None:
+            return
+        t = ft_tensors[idx]
+        raw_bytes_seen += len(t["raw"])
+        compressed_bytes_seen += len(blob)
+        ratio = (compressed_bytes_seen / raw_bytes_seen * 100.0) if raw_bytes_seen else 0.0
+        pbar.set_postfix_str(f"{t['name'][:48]} ratio={ratio:.1f}%")
+        pbar.update(1)
+
     if workers <= 1 or len(jobs) <= 1:
         for job in jobs:
             idx, blob, codec_name, extras, special_label = _delta_worker(job)
             encoded[idx] = (blob, codec_name, extras, special_label)
+            _account(idx, blob)
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             for fut in as_completed([pool.submit(_delta_worker, j) for j in jobs]):
                 idx, blob, codec_name, extras, special_label = fut.result()
                 encoded[idx] = (blob, codec_name, extras, special_label)
+                _account(idx, blob)
+
+    if pbar is not None:
+        pbar.close()
 
     data_buf = io.BytesIO()
     header_tensors: list[dict] = []

@@ -51,11 +51,58 @@ def _cmd_decompress(args):
     print(f"decompressed {src} -> {dst}  ({elapsed:.1f}s)", flush=True)
 
 
+def _fmt_bytes(n):
+    if n is None:
+        return "-"
+    n = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(n) < 1024.0:
+            return f"{n:.2f} {unit}"
+        n /= 1024.0
+    return f"{n:.2f} PiB"
+
+
 def _cmd_info(args):
     from .container import info
     i = info(args.src)
-    for k, v in i.items():
-        print(f"  {k:24s} {v}")
+
+    def line(k, v):
+        print(f"  {k:26s} {v}")
+
+    print(f"BigSmall container: {i['path']}")
+    line("format", i["format"])
+    line("mode", i["mode"])
+    line("model_type", i["model_type"])
+    line("base_model", i["base_model"])
+    line("container_version", i["version"])
+    line("tensor_count", i["tensor_count"])
+    line("file_size", f"{i['file_size']:,} bytes ({_fmt_bytes(i['file_size'])})")
+    line("estimated_raw_bytes", f"{i['estimated_raw_bytes']:,} bytes ({_fmt_bytes(i['estimated_raw_bytes'])})")
+    line("overall ratio_pct", f"{i['ratio_pct']:.2f}%")
+    line("layer_count", i["layer_count"])
+    line("non_layer_raw_bytes", _fmt_bytes(i["non_layer_raw_bytes"]))
+    line("largest_layer_raw_bytes", _fmt_bytes(i["largest_layer_raw_bytes"]))
+    line("streaming_peak_ram_est", _fmt_bytes(i["streaming_peak_ram_bytes"]))
+
+    if i["format_breakdown"]:
+        print("  format_breakdown")
+        for k, v in sorted(i["format_breakdown"].items(), key=lambda x: -x[1]):
+            print(f"    {k:8s} {v} tensors")
+    if i["special_counts"]:
+        print("  special tensors")
+        for k, v in sorted(i["special_counts"].items()):
+            print(f"    {k:12s} {v}")
+
+    if i["top5_best"]:
+        print("  top 5 best-compressed tensors (lower ratio = better)")
+        for pt in i["top5_best"]:
+            print(f"    {pt['ratio_pct']:6.2f}%  {pt['name']}  "
+                  f"({_fmt_bytes(pt['raw_bytes'])} -> {_fmt_bytes(pt['compressed_bytes'])})")
+    if i["top5_worst"]:
+        print("  top 5 worst-compressed tensors")
+        for pt in i["top5_worst"]:
+            print(f"    {pt['ratio_pct']:6.2f}%  {pt['name']}  "
+                  f"({_fmt_bytes(pt['raw_bytes'])} -> {_fmt_bytes(pt['compressed_bytes'])})")
 
 
 def _cmd_verify(args):

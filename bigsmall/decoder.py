@@ -66,10 +66,12 @@ def _decode_blob(t: dict, blob: bytes) -> bytes:
     raise ValueError(f"Unknown codec: {codec}")
 
 
-def decompress(src: str | Path, dst: Optional[str | Path] = None) -> dict[str, np.ndarray]:
+def decompress(src: str | Path, dst: Optional[str | Path] = None,
+               progress: bool = True) -> dict[str, np.ndarray]:
     """Decompress a .bs file to a dict of {name: numpy ndarray}.
 
     If dst is given, also writes a safetensors file at that path.
+    progress=True (default) shows a tqdm progress bar if tqdm is installed.
     """
     src = Path(src)
     header, data_offset = container.read_header(src)
@@ -82,6 +84,15 @@ def decompress(src: str | Path, dst: Optional[str | Path] = None) -> dict[str, n
     out: dict[str, np.ndarray] = {}
     raw_by_name: dict[str, bytes] = {}
 
+    pbar = None
+    if progress:
+        try:
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=len(header["tensors"]), desc="decompress",
+                        unit="tensor", dynamic_ncols=True)
+        except ImportError:
+            pbar = None
+
     # First pass: decode non-tied tensors
     for t in header["tensors"]:
         if t["codec"] == "tied_ref":
@@ -89,6 +100,9 @@ def decompress(src: str | Path, dst: Optional[str | Path] = None) -> dict[str, n
         blob = all_data[t["offset"]:t["offset"] + t["compressed_bytes"]]
         raw = _decode_blob(t, blob)
         raw_by_name[t["name"]] = raw
+        if pbar is not None:
+            pbar.set_postfix_str(t["name"][:48])
+            pbar.update(1)
 
     # Second pass: resolve tied refs
     for t in header["tensors"]:
@@ -96,11 +110,16 @@ def decompress(src: str | Path, dst: Optional[str | Path] = None) -> dict[str, n
             extras = t.get("extra") or {}
             master = extras["tied_to"]
             raw_by_name[t["name"]] = raw_by_name[master]
+            if pbar is not None:
+                pbar.update(1)
 
     # Third pass: convert raw bytes to numpy arrays of correct dtype/shape
     for t in header["tensors"]:
         raw = raw_by_name[t["name"]]
         out[t["name"]] = _raw_to_numpy(raw, t["dtype"], t["shape"])
+
+    if pbar is not None:
+        pbar.close()
 
     if dst is not None:
         _write_safetensors(dst, out, header)
@@ -108,7 +127,8 @@ def decompress(src: str | Path, dst: Optional[str | Path] = None) -> dict[str, n
 
 
 def decompress_delta(delta_src: str | Path, base_src: str | Path,
-                     dst: Optional[str | Path] = None) -> dict[str, np.ndarray]:
+                     dst: Optional[str | Path] = None,
+                     progress: bool = True) -> dict[str, np.ndarray]:
     """Decompress a delta .bs file using a base safetensors or .bs file.
 
     Returns the reconstructed fine-tuned tensors as a dict.
@@ -123,6 +143,16 @@ def decompress_delta(delta_src: str | Path, base_src: str | Path,
         all_data = f.read()
 
     out: dict[str, np.ndarray] = {}
+
+    pbar = None
+    if progress:
+        try:
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=len(header["tensors"]), desc="delta-decompress",
+                        unit="tensor", dynamic_ncols=True)
+        except ImportError:
+            pbar = None
+
     for t in header["tensors"]:
         blob = all_data[t["offset"]:t["offset"] + t["compressed_bytes"]]
         extras = t.get("extra") or {}
@@ -137,6 +167,12 @@ def decompress_delta(delta_src: str | Path, base_src: str | Path,
         else:
             raw = _decode_blob(t, blob)
         out[t["name"]] = _raw_to_numpy(raw, t["dtype"], t["shape"])
+        if pbar is not None:
+            pbar.set_postfix_str(t["name"][:48])
+            pbar.update(1)
+
+    if pbar is not None:
+        pbar.close()
 
     if dst is not None:
         _write_safetensors(dst, out, header)
@@ -231,10 +267,10 @@ def _numpy_to_torch(arr: np.ndarray, dtype_str: str):
     return t
 
 
-def load(src: str | Path, device: str = "cpu") -> dict:
+def load(src: str | Path, device: str = "cpu", progress: bool = True) -> dict:
     """Decompress and return tensors as torch.Tensors on the specified device."""
     import torch
-    raw_dict = decompress(src)
+    raw_dict = decompress(src, progress=progress)
     header, _ = container.read_header(Path(src))
     name_to_dtype = {t["name"]: t["dtype"] for t in header["tensors"]}
     out = {}

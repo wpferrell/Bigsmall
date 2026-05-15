@@ -75,7 +75,7 @@ Streaming peak RAM: **29.6% lower** than full load on GPT-2. On a 70B model the 
 pip install bigsmall
 ```
 
-Requirements: Python 3.9+, PyTorch 2.0+
+Requirements: Python 3.9, 3.10, 3.11, 3.12 | PyTorch 2.0+
 
 Optional extras:
 ```bash

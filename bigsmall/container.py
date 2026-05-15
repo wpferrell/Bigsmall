@@ -74,25 +74,115 @@ def read_blob(path, header: dict, data_offset: int, tensor_idx: int) -> bytes:
         return f.read(t["compressed_bytes"])
 
 
+_DTYPE_BYTES = {
+    "F32": 4, "float32": 4,
+    "F16": 2, "float16": 2,
+    "BF16": 2, "bfloat16": 2,
+    "F8_E4M3": 1, "float8_e4m3fn": 1,
+    "F8_E5M2": 1, "float8_e5m2": 1,
+    "I64": 8, "int64": 8,
+    "I32": 4, "int32": 4,
+    "I16": 2, "int16": 2,
+    "I8": 1, "int8": 1,
+    "U8": 1, "uint8": 1,
+    "BOOL": 1, "bool": 1,
+}
+
+
+def _dtype_to_format(dtype_str: str) -> str:
+    """Map a tensor dtype string to a friendly format label."""
+    s = dtype_str
+    if s in ("F32", "float32"):
+        return "fp32"
+    if s in ("F16", "float16"):
+        return "fp16"
+    if s in ("BF16", "bfloat16"):
+        return "bf16"
+    if s in ("F8_E4M3", "float8_e4m3fn", "F8_E5M2", "float8_e5m2"):
+        return "fp8"
+    return "other"
+
+
+def _tensor_raw_bytes(t: dict) -> int:
+    """Raw byte count for one tensor entry."""
+    n = 1
+    for d in t["shape"]:
+        n *= d
+    return int(n * _DTYPE_BYTES.get(t["dtype"], 1))
+
+
+def _layer_index_from_name(name: str) -> Any:
+    """Lazy import to avoid circular dependency at module load."""
+    from .streaming import layer_index
+    return layer_index(name)
+
+
 def info(path) -> dict[str, Any]:
-    """Return summary info for a .bs file (no decompression)."""
+    """Return summary info for a .bs file (no decompression).
+
+    Includes per-tensor compression ratios, top/worst-5 tensor lists,
+    format breakdown, special-tensor counts, and a streaming peak RAM
+    estimate (embeddings/non-layer tensors plus the largest single layer).
+    """
     p = Path(path)
     header, data_offset = read_header(p)
     file_size = p.stat().st_size
     data_size = file_size - data_offset
-    total_raw = 0
-    dtype_to_bytes = {
-        "fp32": 4, "bf16": 2, "fp16": 2, "fp8": 1, "fp4": 1,  # fp4 stored unpacked
-    }
+
     fmt = header["format"]
-    bytes_per_w = dtype_to_bytes.get(fmt, 1)
-    if fmt == "fp4":
-        bytes_per_w = 0.5
+    per_tensor: list[dict] = []
+    total_raw = 0
+    format_breakdown: dict[str, int] = {}
+    special_counts: dict[str, int] = {}
+
     for t in header["tensors"]:
-        n = 1
-        for d in t["shape"]:
-            n *= d
-        total_raw += int(n * bytes_per_w)
+        raw_bytes = _tensor_raw_bytes(t)
+        total_raw += raw_bytes
+        comp = int(t["compressed_bytes"])
+        ratio = (comp / raw_bytes * 100.0) if raw_bytes > 0 else 0.0
+        tf = _dtype_to_format(t["dtype"])
+        format_breakdown[tf] = format_breakdown.get(tf, 0) + 1
+        special = t.get("special")
+        if special:
+            special_counts[special] = special_counts.get(special, 0) + 1
+        per_tensor.append({
+            "name": t["name"],
+            "shape": t["shape"],
+            "dtype": t["dtype"],
+            "codec": t["codec"],
+            "special": special,
+            "raw_bytes": raw_bytes,
+            "compressed_bytes": comp,
+            "ratio_pct": ratio,
+        })
+
+    # Streaming peak RAM estimate:
+    #   peak = sum(non-layer tensor raw bytes) + max(per-layer total raw bytes)
+    non_layer_raw = 0
+    layer_raw_totals: dict[int, int] = {}
+    for pt in per_tensor:
+        li = _layer_index_from_name(pt["name"])
+        if li is None:
+            non_layer_raw += pt["raw_bytes"]
+        else:
+            layer_raw_totals[li] = layer_raw_totals.get(li, 0) + pt["raw_bytes"]
+    largest_layer = max(layer_raw_totals.values()) if layer_raw_totals else 0
+    streaming_peak_ram_bytes = non_layer_raw + largest_layer
+
+    # Filter ratios for "best/worst" lists - skip tied entries (compressed_bytes=0)
+    ranked = [pt for pt in per_tensor if pt["compressed_bytes"] > 0 and pt["raw_bytes"] > 0]
+    ranked.sort(key=lambda x: x["ratio_pct"])
+    best5 = [
+        {"name": x["name"], "ratio_pct": x["ratio_pct"],
+         "raw_bytes": x["raw_bytes"], "compressed_bytes": x["compressed_bytes"]}
+        for x in ranked[:5]
+    ]
+    worst5 = [
+        {"name": x["name"], "ratio_pct": x["ratio_pct"],
+         "raw_bytes": x["raw_bytes"], "compressed_bytes": x["compressed_bytes"]}
+        for x in ranked[-5:][::-1]
+    ]
+
     ratio = (file_size / total_raw * 100) if total_raw > 0 else 0.0
     return {
         "path": str(p),
@@ -107,4 +197,13 @@ def info(path) -> dict[str, Any]:
         "estimated_raw_bytes": total_raw,
         "ratio_pct": ratio,
         "version": VERSION,
+        "format_breakdown": format_breakdown,
+        "special_counts": special_counts,
+        "per_tensor": per_tensor,
+        "top5_best": best5,
+        "top5_worst": worst5,
+        "layer_count": len(layer_raw_totals),
+        "non_layer_raw_bytes": non_layer_raw,
+        "largest_layer_raw_bytes": largest_layer,
+        "streaming_peak_ram_bytes": streaming_peak_ram_bytes,
     }

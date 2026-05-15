@@ -230,7 +230,8 @@ def _download_bigsmall_repo(repo_id: str, cache_dir: Optional[str] = None) -> Pa
 def from_pretrained(repo_or_path: str | Path,
                     device: str = "cpu",
                     cache_dir: Optional[str] = None,
-                    show_progress: bool = True) -> dict:
+                    show_progress: bool = True,
+                    progress: Optional[bool] = None) -> dict:
     """Download (if needed) and decompress a BigSmall model into a torch state_dict.
 
     Args:
@@ -239,15 +240,22 @@ def from_pretrained(repo_or_path: str | Path,
                       OR a single .bs file.
         device: device for the returned torch tensors.
         cache_dir: optional cache override (defaults to HF_HOME).
-        show_progress: print per-shard progress.
+        show_progress: kept for backwards compatibility. If `progress` is None,
+                       this value is used to enable/disable tqdm bars.
+        progress: explicit override for tqdm bars. None = follow show_progress.
 
     Returns:
         dict[str, torch.Tensor] - state_dict suitable for model.load_state_dict().
     """
     import torch  # noqa: F401  (imported for early failure if torch missing)
 
+    if progress is None:
+        progress = show_progress
+
     s = str(repo_or_path)
     if _is_repo_id(s):
+        if show_progress:
+            print(f"[bigsmall] downloading {s} from HuggingFace Hub", flush=True)
         local = _download_bigsmall_repo(s, cache_dir=cache_dir)
     else:
         local = Path(repo_or_path)
@@ -255,7 +263,7 @@ def from_pretrained(repo_or_path: str | Path,
     if local.is_file():
         if show_progress:
             print(f"[bigsmall] decompressing {local.name}", flush=True)
-        return decoder.load(local, device=device)
+        return decoder.load(local, device=device, progress=progress)
 
     if not local.is_dir():
         raise FileNotFoundError(f"Path not found: {local}")
@@ -273,14 +281,30 @@ def from_pretrained(repo_or_path: str | Path,
 
     state_dict: dict = {}
     total = len(shards)
+
+    shard_bar = None
+    if progress and total > 1:
+        try:
+            from tqdm.auto import tqdm
+            shard_bar = tqdm(total=total, desc="shards", unit="shard",
+                             dynamic_ncols=True, position=0)
+        except ImportError:
+            shard_bar = None
+
     for i, shard in enumerate(shards, start=1):
-        if show_progress:
+        if shard_bar is None and show_progress:
             print(f"[bigsmall] decompressing shard {i}/{total}: {shard.name}", flush=True)
-        part = decoder.load(shard, device=device)
+        part = decoder.load(shard, device=device, progress=progress)
         # Detect duplicate keys across shards (HF disallows this; we error loudly)
         dup = set(part) & set(state_dict)
         if dup:
             raise ValueError(f"Duplicate tensor names across shards: {sorted(dup)[:5]}...")
         state_dict.update(part)
+        if shard_bar is not None:
+            shard_bar.set_postfix_str(shard.name)
+            shard_bar.update(1)
+
+    if shard_bar is not None:
+        shard_bar.close()
 
     return state_dict

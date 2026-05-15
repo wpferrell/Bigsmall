@@ -18,14 +18,14 @@ HuggingFace Hub round-trip (Phase 4):
 Streaming loader (Phase 4 cont.):
     bigsmall.StreamingLoader(path, device="cuda")   - layer-by-layer decompression
 """
-__version__ = "1.0.1"
+__version__ = "2.0.0"
 
 from .encoder import compress, compress_delta
 from .decoder import decompress, decompress_delta, load
 from .verify import verify
 from .container import info
 from .hub import compress_for_hub, upload_to_hub, from_pretrained
-from .integrations.huggingface import install_hook
+from .integrations.huggingface import install_hook, uninstall_hook
 from .streaming import StreamingLoader
 
 __all__ = [
@@ -40,6 +40,7 @@ __all__ = [
     "upload_to_hub",
     "from_pretrained",
     "install_hook",
+    "uninstall_hook",
     "StreamingLoader",
     "__version__",
 ]

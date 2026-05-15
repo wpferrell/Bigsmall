@@ -216,17 +216,33 @@ class StreamingLoader:
             out[n] = self.load_tensor(n)
         return out
 
-    def iter_layers(self) -> Iterator[tuple[int, dict[str, "torch.Tensor"]]]:
+    def iter_layers(self, progress: bool = True) -> Iterator[tuple[int, dict[str, "torch.Tensor"]]]:
         """Yield (layer_idx, tensors_dict) one layer at a time.
 
         Each yielded dict is the only reference to that layer's tensors held
         by the loader; once the caller drops the reference the memory is
         eligible for reclamation. On CUDA devices we also empty the cache
         between iterations to actively release VRAM.
+
+        progress=True (default) shows a tqdm progress bar if tqdm is installed.
         """
         import torch
-        for i in sorted(self._layers.keys()):
+
+        layer_indices = sorted(self._layers.keys())
+        iterator = layer_indices
+        pbar = None
+        if progress:
+            try:
+                from tqdm.auto import tqdm
+                pbar = tqdm(total=len(layer_indices), desc="layers",
+                            unit="layer", dynamic_ncols=True)
+            except ImportError:
+                pbar = None
+
+        for i in iterator:
             layer = self.load_layer(i)
+            if pbar is not None:
+                pbar.set_postfix_str(f"layer {i}")
             try:
                 yield i, layer
             finally:
@@ -235,3 +251,8 @@ class StreamingLoader:
                 if isinstance(self.device, str) and self.device.startswith("cuda") \
                         and torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                if pbar is not None:
+                    pbar.update(1)
+
+        if pbar is not None:
+            pbar.close()

@@ -108,10 +108,11 @@ state_dict = bigsmall.from_pretrained("you/mistral-7b-bigsmall")
 
 Ready to use -- no compression step needed:
 
-| Model | HuggingFace | Original | Compressed |
-|-------|-------------|----------|------------|
-| Mistral 7B Instruct v0.3 | [wpferrell/mistral-7b-instruct-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-bigsmall) | 14.2 GB | 9.3 GB |
-| GPT-2 117M | [wpferrell/gpt2-bigsmall](https://huggingface.co/wpferrell/gpt2-bigsmall) | 548 MB | 414 MB |
+| Model | HuggingFace | Original | Compressed | Ratio |
+|-------|-------------|----------|------------|-------|
+| Mistral 7B Instruct v0.3 | [wpferrell/mistral-7b-instruct-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-bigsmall) | 14.2 GB | 9.3 GB | 65.6% |
+| Qwen 2.5 14B Instruct | [wpferrell/qwen2.5-14b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-14b-instruct-bigsmall) | 29.5 GB | 19.5 GB | 66.1% |
+| GPT-2 117M | [wpferrell/gpt2-bigsmall](https://huggingface.co/wpferrell/gpt2-bigsmall) | 548 MB | 414 MB | 75.5% |
 
 ---
 

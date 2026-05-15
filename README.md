@@ -153,14 +153,15 @@ bigsmall decompress delta.bs --base base.safetensors -o reconstructed.safetensor
 
 ---
 
-## vs. other tools
+## Comparison
 
-| Tool | Formats | Ratio | Lossless | Inference overhead |
-|------|---------|-------|----------|--------------------|
-| ZipNN | FP32 only | ~83% | Yes | None |
-| DFloat11 | BF16 only | ~68% | Yes | ~2x at batch=1 |
-| ZipServ | BF16 only | ~70% | Yes | None (H100 only) |
-| **BigSmall** | **All formats** | **60-86%** | Yes | **None** |
+| Tool | BF16 Ratio | FP32 Ratio | Inference Overhead | Hardware |
+|------|------------|------------|-------------------|---------|
+| [ZipNN](https://arxiv.org/abs/2411.05239) | 67% | 83% | None (load-time only) | CPU |
+| [DFloat11](https://arxiv.org/abs/2504.11651) | ~70% | BF16 only | ~2x at batch=1 | CUDA only |
+| **BigSmall** | **59.8%** | **75.5%** | **None** | **CPU + any GPU** |
+
+*Lower ratio = better compression. BigSmall numbers measured on Mistral 7B (BF16) and GPT-2 (FP32), md5 verified lossless.*
 
 ---
 

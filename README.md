@@ -4,9 +4,7 @@
 
 Mistral 7B is 14 GB. Your machine has 8 GB. Today your only option is quantization -- a degraded, worse version of the model. BigSmall changes that.
 
-BigSmall compresses model weights **losslessly** for storage and distribution. Mistral 7B goes from 14 GB to 9 GB on disk and downloads 35% faster. The model decompresses once at load time -- then runs at full native speed with **zero inference overhead, on any hardware**. You run the **exact same model**. Bit-for-bit identical weights. No quality loss. No accuracy regression. No surprises.
-
-**BigSmall vs DFloat11:** Both are lossless. DFloat11 keeps weights compressed during inference (saves VRAM, adds ~2x overhead at batch=1, CUDA only). BigSmall decompresses at load time (no inference overhead, works on CPU, Apple Silicon, AMD, any GPU). Different tools for different problems.
+BigSmall compresses model weights **losslessly**. Mistral 7B goes from 14 GB to 9 GB. The streaming loader means you never need 9 GB free at once -- it decompresses one layer at a time, directly into VRAM, with a peak RAM footprint of under 2 GB. You run the **exact same model**. Bit-for-bit identical weights. No quality loss. No accuracy regression. No surprises.
 
 ```bash
 pip install bigsmall
@@ -40,14 +38,47 @@ But it's not the same model anymore. 4-bit quantization degrades every weight. T
 
 ## What it does
 
+### BigSmall vs quantization (llama.cpp, GGUF, bitsandbytes, AWQ)
+
 | | Quantization (4-bit) | BigSmall |
 |--|--|--|
-| Lossless? | No -- weights degraded | Yes -- bit-identical |
+| Lossless? | No -- weights permanently degraded | **Yes -- bit-identical** |
 | Mistral 7B size | ~4 GB | **9 GB** |
-| Peak RAM to load | ~4 GB | **< 2 GB** (streaming) |
-| Inference speed | Slower on some hardware | Native (decompress once) |
-| Fine-tuning safe? | No -- drift from quantized base | Yes -- clean base |
-| Reproducible? | No | Yes |
+| Peak RAM to load | ~4 GB | **< 2 GB** (streaming loader) |
+| Inference speed | Slower on some hardware | **Native -- decompress once, run forever** |
+| Fine-tuning safe? | No -- drift from degraded base | **Yes -- clean original weights** |
+| Reproducible outputs? | No | **Yes** |
+| FP32 support? | No | **Yes** |
+
+### BigSmall vs DFloat11 (the other lossless option)
+
+DFloat11 keeps weights compressed in GPU memory and decompresses per forward pass. BigSmall decompresses once at load time and runs at full native speed. Different tools, different tradeoffs.
+
+| | BigSmall | DFloat11 |
+|--|--|--|
+| Compression ratio (BF16) | **65-66%** | ~70% |
+| Compression ratio (FP32) | **75-83%** | BF16 only |
+| Inference overhead | **None -- decompress at load** | ~2x slower at batch=1 |
+| Hardware | **CPU, Apple Silicon, AMD, any GPU** | CUDA only |
+| FP32 / FP16 / FP8 / FP4 | **All supported** | BF16 only |
+| Fine-tuning safe? | **Yes -- decompress and fine-tune** | No -- stays compressed |
+| Delta compression | **Yes -- 6.95% of source size** | No |
+| vLLM compatible? | **Yes** | Custom inference engine only |
+| Peak RAM (streaming) | **< 2 GB for any model size** | Full model in VRAM |
+| Pre-compressed models on HF | **13+ and growing** | ~30 (low downloads) |
+
+### BigSmall vs ZipNN (the other storage-compression option)
+
+Both decompress at load time. BigSmall compresses significantly better and supports more formats.
+
+| | BigSmall | ZipNN |
+|--|--|--|
+| Compression ratio (BF16) | **65-66%** | ~67% |
+| Compression ratio (FP32) | **75-83%** | ~83% |
+| FP32 / FP16 / FP8 / FP4 | **All supported** | Mainly BF16 |
+| Streaming loader | **Yes -- peak RAM < 2 GB** | No |
+| Pre-compressed models on HF | **13+ and growing** | 5 total |
+| Hardware | **Any** | Any |
 
 ---
 

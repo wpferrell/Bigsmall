@@ -111,9 +111,17 @@ Ready to use -- no compression step needed:
 | Model | HuggingFace | Original | Compressed | Ratio |
 |-------|-------------|----------|------------|-------|
 | Mistral 7B Instruct v0.3 | [wpferrell/mistral-7b-instruct-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-bigsmall) | 14.2 GB | 9.3 GB | 65.6% |
+| Mistral 7B Instruct v0.2 | [wpferrell/mistral-7b-instruct-v0.2-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-v0.2-bigsmall) | 14.5 GB | 9.5 GB | 65.5% |
 | Llama 3.1 8B Instruct | [wpferrell/llama-3.1-8b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.1-8b-instruct-bigsmall) | 15.0 GB | 9.75 GB | 65.0% |
+| Llama 3 8B Instruct | [wpferrell/llama-3-8b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3-8b-instruct-bigsmall) | 15.0 GB | 9.8 GB | 65.3% |
+| Llama 3.2 3B Instruct | [wpferrell/llama-3.2-3b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.2-3b-instruct-bigsmall) | 6.0 GB | 3.9 GB | 65.0% |
+| Llama 3.2 1B Instruct | [wpferrell/llama-3.2-1b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.2-1b-instruct-bigsmall) | 2.5 GB | 1.6 GB | 64.0% |
 | Qwen 2.5 14B Instruct | [wpferrell/qwen2.5-14b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-14b-instruct-bigsmall) | 29.5 GB | 19.5 GB | 66.1% |
 | Qwen 2.5 7B Instruct | [wpferrell/qwen2.5-7b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-7b-instruct-bigsmall) | 15.2 GB | 10.1 GB | 66.0% |
+| Qwen 2.5 3B Instruct | [wpferrell/qwen2.5-3b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-3b-instruct-bigsmall) | 5.76 GB | 3.81 GB | 66.1% |
+| Qwen 2.5 1.5B Instruct | [wpferrell/qwen2.5-1.5b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-1.5b-instruct-bigsmall) | 2.89 GB | 1.91 GB | 66.1% |
+| Qwen 2.5 0.5B Instruct | [wpferrell/qwen2.5-0.5b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-0.5b-instruct-bigsmall) | 0.97 GB | 0.62 GB | 63.9% |
+| Qwen 3 4B Instruct | [wpferrell/qwen3-4b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen3-4b-instruct-bigsmall) | 8.06 GB | 5.3 GB | 65.7% |
 | GPT-2 117M | [wpferrell/gpt2-bigsmall](https://huggingface.co/wpferrell/gpt2-bigsmall) | 548 MB | 414 MB | 75.5% |
 ---
 

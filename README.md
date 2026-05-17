@@ -158,12 +158,19 @@ print(tokenizer.decode(outputs[0]))
 
 | Model | HuggingFace | Original | Compressed | Ratio |
 |-------|-------------|----------|------------|-------|
+| DeepSeek V4 Flash | [wpferrell/deepseek-v4-flash-bigsmall](https://huggingface.co/wpferrell/deepseek-v4-flash-bigsmall) | 148.7 GB | ~97 GB | ~65% |
 | Mistral 7B Instruct v0.3 | [wpferrell/mistral-7b-instruct-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-bigsmall) | 14.2 GB | 9.3 GB | 65.6% |
 | Mistral 7B Instruct v0.2 | [wpferrell/mistral-7b-instruct-v0.2-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-v0.2-bigsmall) | 14.5 GB | 9.5 GB | 65.5% |
 | Llama 3.1 8B Instruct | [wpferrell/llama-3.1-8b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.1-8b-instruct-bigsmall) | 15.0 GB | 9.75 GB | 65.0% |
 | Llama 3 8B Instruct | [wpferrell/llama-3-8b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3-8b-instruct-bigsmall) | 15.0 GB | 9.8 GB | 65.3% |
 | Llama 3.2 3B Instruct | [wpferrell/llama-3.2-3b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.2-3b-instruct-bigsmall) | 6.0 GB | 3.9 GB | 65.0% |
 | Llama 3.2 1B Instruct | [wpferrell/llama-3.2-1b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.2-1b-instruct-bigsmall) | 2.5 GB | 1.6 GB | 64.0% |
+| Gemma 2 9B Instruct | [wpferrell/gemma-2-9b-it-bigsmall](https://huggingface.co/wpferrell/gemma-2-9b-it-bigsmall) | 17.2 GB | ~11.2 GB | ~65% |
+| Gemma 2 2B Instruct | [wpferrell/gemma-2-2b-it-bigsmall](https://huggingface.co/wpferrell/gemma-2-2b-it-bigsmall) | 4.87 GB | ~3.2 GB | ~65% |
+| Gemma 2 2B | [wpferrell/gemma-2-2b-bigsmall](https://huggingface.co/wpferrell/gemma-2-2b-bigsmall) | 9.74 GB | ~6.3 GB | ~65% |
+| Gemma 3 1B Instruct | [wpferrell/gemma-3-1b-it-bigsmall](https://huggingface.co/wpferrell/gemma-3-1b-it-bigsmall) | 1.86 GB | ~1.2 GB | ~65% |
+| Gemma 3 270M | [wpferrell/gemma-3-270m-bigsmall](https://huggingface.co/wpferrell/gemma-3-270m-bigsmall) | 0.5 GB | ~0.33 GB | ~65% |
+| Gemma 3 270M Instruct | [wpferrell/gemma-3-270m-it-bigsmall](https://huggingface.co/wpferrell/gemma-3-270m-it-bigsmall) | 0.5 GB | ~0.33 GB | ~65% |
 | Qwen 2.5 14B Instruct | [wpferrell/qwen2.5-14b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-14b-instruct-bigsmall) | 29.5 GB | 19.5 GB | 66.1% |
 | Qwen 2.5 7B Instruct | [wpferrell/qwen2.5-7b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-7b-instruct-bigsmall) | 15.2 GB | 10.1 GB | 66.0% |
 | Qwen 2.5 3B Instruct | [wpferrell/qwen2.5-3b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-3b-instruct-bigsmall) | 5.76 GB | 3.81 GB | 66.1% |

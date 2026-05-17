@@ -4,7 +4,9 @@
 
 Mistral 7B is 14 GB. Your machine has 8 GB. Today your only option is quantization -- a degraded, worse version of the model. BigSmall changes that.
 
-BigSmall compresses model weights **losslessly**. Mistral 7B goes from 14 GB to 9 GB. The streaming loader means you never need 9 GB free at once -- it decompresses one layer at a time, directly into VRAM, with a peak RAM footprint of under 2 GB. You run the **exact same model**. Bit-for-bit identical weights. No quality loss. No accuracy regression. No surprises.
+BigSmall compresses model weights **losslessly** for storage and distribution. Mistral 7B goes from 14 GB to 9 GB on disk and downloads 35% faster. The model decompresses once at load time -- then runs at full native speed with **zero inference overhead, on any hardware**. You run the **exact same model**. Bit-for-bit identical weights. No quality loss. No accuracy regression. No surprises.
+
+**BigSmall vs DFloat11:** Both are lossless. DFloat11 keeps weights compressed during inference (saves VRAM, adds ~2x overhead at batch=1, CUDA only). BigSmall decompresses at load time (no inference overhead, works on CPU, Apple Silicon, AMD, any GPU). Different tools for different problems.
 
 ```bash
 pip install bigsmall

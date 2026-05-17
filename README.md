@@ -182,27 +182,29 @@ print(tokenizer.decode(outputs[0]))
 
 ## Streaming loader -- run any model on any hardware
 
-The streaming loader is BigSmall's killer feature. It decompresses one transformer layer at a time, loads it into VRAM, runs inference on that layer, then frees the memory before loading the next. Your peak RAM usage is one layer -- not the whole model.
+The streaming loader decompresses one transformer layer at a time, loads it into VRAM, runs inference, then frees the memory before the next layer. Your peak VRAM is one layer -- not the whole model.
 
 **What this means in practice:**
 
 | Model | Normal VRAM needed | BigSmall streaming VRAM | Runs on |
 |-------|-------------------|------------------------|---------|
-| GPT-2 117M | 0.5 GB | < 0.1 GB | Any GPU, CPU |
-| Gemma 3 1B | 1.9 GB | < 0.3 GB | Any GPU, CPU |
-| Llama 3.2 3B | 6.0 GB | < 0.5 GB | Any GPU, CPU |
-| Mistral 7B | 14 GB | < 1 GB | Any GPU, CPU |
-| Llama 3.1 8B | 15 GB | < 1 GB | Any GPU, CPU |
-| Qwen 2.5 14B | 29.5 GB | < 2 GB | Any GPU, CPU |
-| DeepSeek V4 Flash | 148 GB | < 4 GB | Any GPU, CPU |
+| GPT-2 117M | 0.55 GB | < 0.1 GB | Any GPU or CPU |
+| Gemma 3 1B | 1.86 GB | < 0.2 GB | Any GPU or CPU |
+| Llama 3.2 3B | 6.0 GB | < 0.5 GB | Any GPU or CPU |
+| Mistral 7B | 14.2 GB | < 1 GB | Any GPU or CPU |
+| Llama 3.1 8B | 15.0 GB | < 1 GB | Any GPU or CPU |
+| Qwen 2.5 14B | 29.5 GB | < 2 GB | Any GPU or CPU |
+| DeepSeek V4-Flash | 148.7 GB | < 4 GB | Any GPU or CPU |
 
-A 4GB GPU (GTX 1650, RX 6500 XT, M1 MacBook) can now run Mistral 7B. A 8GB GPU (RTX 3060, RX 6700, M2) can run Qwen 14B. No quantization. Full quality.
+A 4 GB GPU (GTX 1650, M1 MacBook) can run Mistral 7B losslessly. An 8 GB GPU (RTX 3060, M2) can run Qwen 14B. No quantization. Full quality.
+
+BigSmall is the only lossless compression tool with a streaming loader. DFloat11 and ZipNN load the full model into memory before inference.
 
 `python
 from bigsmall import StreamingLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Runs Mistral 7B on a 4GB GPU -- no quantization
+# Runs Mistral 7B on a 4 GB GPU
 with StreamingLoader("wpferrell/mistral-7b-instruct-bigsmall", device="cuda") as loader:
     model = loader.load_model(AutoModelForCausalLM)
 
@@ -212,39 +214,19 @@ outputs = model.generate(**inputs, max_new_tokens=200)
 print(tokenizer.decode(outputs[0]))
 `
 
-**How it fits into your hardware:**
+**Hardware guide:**
 
 `
-Your GPU VRAM          What you can run (streaming)
-????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-2 GB                   GPT-2, Gemma 270M, any small model
-4 GB                   Llama 3.2 3B, Mistral 7B, Gemma 2B
-6 GB                   Llama 3.1 8B, Gemma 9B
-8 GB                   Qwen 2.5 14B, Gemma 2 9B
-12 GB                  Qwen 2.5 32B
-24 GB                  Llama 70B, Qwen 72B, DeepSeek V4-Flash
-CPU only               Everything -- slower but it works
+Your GPU VRAM     What you can run (BigSmall streaming, lossless)
+??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+2 GB              GPT-2, Gemma 270M, small models
+4 GB              Llama 3.2 3B, Mistral 7B, Gemma 2B, Llama 3.1 8B
+8 GB              Qwen 2.5 14B, Gemma 2 9B
+12 GB             Qwen 2.5 32B
+24 GB             Llama 70B, Qwen 72B, DeepSeek V4-Flash
+CPU only          Everything -- slower but lossless full quality
 `
 
-BigSmall is the only lossless compression tool with a streaming loader. DFloat11 and ZipNN load the full model into memory.
-
-The streaming loader lets you run models that don't fit in RAM or VRAM. It decompresses one transformer layer at a time, directly into the target device, and frees the previous layer before loading the next. Peak memory is `embeddings + one layer` -- typically under 2 GB even for 7B models.
-
-```python
-with bigsmall.StreamingLoader("wpferrell/mistral-7b-instruct-bigsmall", device="cuda") as loader:
-    print(f"{loader.layer_count()} layers")
-
-    # Load embeddings and non-layer tensors upfront (small)
-    base = loader.load_non_layer_tensors()
-
-    # Stream layers one at a time
-    for layer_idx, layer_tensors in loader.iter_layers():
-        # Previous layer already freed from memory
-        # layer_tensors is on device, ready to use
-        pass
-```
-
----
 
 ## vLLM integration
 

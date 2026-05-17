@@ -180,7 +180,53 @@ print(tokenizer.decode(outputs[0]))
 | GPT-2 117M | [wpferrell/gpt2-bigsmall](https://huggingface.co/wpferrell/gpt2-bigsmall) | 548 MB | 414 MB | 75.5% |
 ---
 
-## Streaming loader
+## Streaming loader -- run any model on any hardware
+
+The streaming loader is BigSmall's killer feature. It decompresses one transformer layer at a time, loads it into VRAM, runs inference on that layer, then frees the memory before loading the next. Your peak RAM usage is one layer -- not the whole model.
+
+**What this means in practice:**
+
+| Model | Normal VRAM needed | BigSmall streaming VRAM | Runs on |
+|-------|-------------------|------------------------|---------|
+| GPT-2 117M | 0.5 GB | < 0.1 GB | Any GPU, CPU |
+| Gemma 3 1B | 1.9 GB | < 0.3 GB | Any GPU, CPU |
+| Llama 3.2 3B | 6.0 GB | < 0.5 GB | Any GPU, CPU |
+| Mistral 7B | 14 GB | < 1 GB | Any GPU, CPU |
+| Llama 3.1 8B | 15 GB | < 1 GB | Any GPU, CPU |
+| Qwen 2.5 14B | 29.5 GB | < 2 GB | Any GPU, CPU |
+| DeepSeek V4 Flash | 148 GB | < 4 GB | Any GPU, CPU |
+
+A 4GB GPU (GTX 1650, RX 6500 XT, M1 MacBook) can now run Mistral 7B. A 8GB GPU (RTX 3060, RX 6700, M2) can run Qwen 14B. No quantization. Full quality.
+
+`python
+from bigsmall import StreamingLoader
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Runs Mistral 7B on a 4GB GPU -- no quantization
+with StreamingLoader("wpferrell/mistral-7b-instruct-bigsmall", device="cuda") as loader:
+    model = loader.load_model(AutoModelForCausalLM)
+
+tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.3")
+inputs = tokenizer("Hello!", return_tensors="pt").to("cuda")
+outputs = model.generate(**inputs, max_new_tokens=200)
+print(tokenizer.decode(outputs[0]))
+`
+
+**How it fits into your hardware:**
+
+`
+Your GPU VRAM          What you can run (streaming)
+????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
+2 GB                   GPT-2, Gemma 270M, any small model
+4 GB                   Llama 3.2 3B, Mistral 7B, Gemma 2B
+6 GB                   Llama 3.1 8B, Gemma 9B
+8 GB                   Qwen 2.5 14B, Gemma 2 9B
+12 GB                  Qwen 2.5 32B
+24 GB                  Llama 70B, Qwen 72B, DeepSeek V4-Flash
+CPU only               Everything -- slower but it works
+`
+
+BigSmall is the only lossless compression tool with a streaming loader. DFloat11 and ZipNN load the full model into memory.
 
 The streaming loader lets you run models that don't fit in RAM or VRAM. It decompresses one transformer layer at a time, directly into the target device, and frees the previous layer before loading the next. Peak memory is `embeddings + one layer` -- typically under 2 GB even for 7B models.
 

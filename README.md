@@ -139,7 +139,22 @@ state_dict = bigsmall.from_pretrained("you/mistral-7b-bigsmall")
 
 ## Pre-compressed models
 
-Ready to use -- no compression step needed:
+Ready to use -- no compression step needed. Just swap the model ID:
+
+`python
+import bigsmall
+bigsmall.install_hook()
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Pick any model from the table below -- works identically to the original
+model = AutoModelForCausalLM.from_pretrained("wpferrell/qwen2.5-7b-instruct-bigsmall")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+
+inputs = tokenizer("Hello!", return_tensors="pt")
+outputs = model.generate(**inputs, max_new_tokens=100)
+print(tokenizer.decode(outputs[0]))
+`
 
 | Model | HuggingFace | Original | Compressed | Ratio |
 |-------|-------------|----------|------------|-------|

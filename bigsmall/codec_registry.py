@@ -30,7 +30,7 @@ from typing import Callable, Optional
 
 from . import tensor_analysis as ta
 from .codecs import (
-    bf16, bf16_rans, bf16_sparsity, bf16_parallel, fp2_residual,
+    bf16, bf16_rans, bf16_tans, bf16_sparsity, bf16_parallel, fp2_residual,
     fp32, fp16, fp8, fp4, generic,
 )
 
@@ -64,6 +64,10 @@ def _enc_bf16(raw, **_):
 
 def _enc_bf16_rans(raw, **_):
     return bf16_rans.encode(raw)
+
+
+def _enc_bf16_tans(raw, **_):
+    return bf16_tans.encode(raw)
 
 
 def _enc_bf16_sparsity(raw, threshold_word=None, **_):
@@ -108,6 +112,10 @@ def _dec_bf16_rans(blob, extras, n_weights):
     return bf16_rans.decode(blob, extras, n_weights)
 
 
+def _dec_bf16_tans(blob, extras, n_weights):
+    return bf16_tans.decode(blob, extras, n_weights)
+
+
 def _dec_bf16_sparsity(blob, extras, n_weights):
     return bf16_sparsity.decode(blob, extras, n_weights)
 
@@ -142,6 +150,7 @@ def _dec_zstd(blob, extras, n_weights):
 
 register_codec("bf16_se_ac", _enc_bf16, _dec_bf16)
 register_codec("bf16_se_rans", _enc_bf16_rans, _dec_bf16_rans)
+register_codec("bf16_se_tans", _enc_bf16_tans, _dec_bf16_tans)
 register_codec("bf16_sparsity_v1", _enc_bf16_sparsity, _dec_bf16_sparsity)
 register_codec("fp2_residual_v1", _enc_fp2_residual, _dec_fp2_residual)
 register_codec("bf16_parallel_v1", _enc_bf16_parallel, _dec_bf16_parallel)
@@ -196,7 +205,9 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
                       enable_fp2_residual: bool = True,
                       enable_gpu_parallel: bool = False,
                       gpu_parallel_n_streams: int = 128,
-                      gpu_parallel_tolerance: float = 0.01) -> tuple[bytes, str, dict]:
+                      gpu_parallel_tolerance: float = 0.01,
+                      prefer_speed: bool = False,
+                      prefer_speed_tolerance: float = 0.0015) -> tuple[bytes, str, dict]:
     """Try every candidate codec for `fmt` and return the smallest blob.
 
     Args:
@@ -286,6 +297,24 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
             best_name = name
             best_blob = blob
             best_extras = extras or {}
+
+    # Fast-decode candidate: bf16_se_tans (Numba-JIT rANS) decodes ~2.3x
+    # faster than bf16_se_ac at +0.1pp size cost on real models. Only runs
+    # when caller opts in via prefer_speed=True. Tolerance default: 0.15%.
+    if (prefer_speed and fmt == "bf16"
+            and "bf16_se_tans" not in candidates):
+        try:
+            tans_blob, tans_extras = bf16_tans.encode(raw)
+        except Exception:
+            tans_blob = None
+            tans_extras = None
+        if tans_blob is not None and best_size is not None:
+            tolerance_bytes = max(2048, int(len(raw) * prefer_speed_tolerance))
+            if len(tans_blob) <= best_size + tolerance_bytes:
+                best_blob = tans_blob
+                best_name = "bf16_se_tans"
+                best_size = len(tans_blob)
+                best_extras = tans_extras or {}
 
     # Speed-preference tie-break: bf16_se_rans encodes/decodes ~1.1-1.3x
     # faster than bf16_se_ac at virtually identical compression. Per-bucket

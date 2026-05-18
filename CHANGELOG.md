@@ -1,3 +1,65 @@
+## [3.5.0] - 2026-05-18
+
+v3.5.0 ships **`bf16_se_tans`** — a Numba-JIT-compiled rANS codec that
+finally delivers a measurable speedup over the constriction baseline.
+The Cython path the spec proposed wasn't buildable on this Windows box
+(no MSVC/MinGW in PATH), so I used Numba (already in deps) instead —
+same goal of eliminating Python↔Rust FFI overhead.
+
+### Measurements on Phi-3.5-mini shard 1 (128 BF16 tensors, 4.97 GB)
+
+| Codec | Encode | Decode | Ratio | vs AC decode |
+|---|---|---|---|---|
+| bf16_se_ac    (3.3.0 baseline) | 48.0 MB/s | 26.5 MB/s | 65.71% | 1.00x |
+| bf16_se_rans  (3.4.0, constriction.AnsCoder) | 45.0 MB/s | 27.0 MB/s | 65.70% | 1.04x |
+| **bf16_se_tans (3.5.0, Numba)** | **51.9 MB/s** | **61.0 MB/s** | **65.80%** | **2.30x** |
+
+Compressed size +0.095pp vs AC (within spec's 0.1pp gate). Lossless
+round-trip md5-verified across 108 tests.
+
+The spec predicted 5-10x — actual is 2.3x. The remaining gap is the
+per-bucket Python orchestration (≈80 buckets per tensor) and table
+construction (slot table, cumulative frequencies). Removing those
+costs further would need to fold the entire bf16 encode/decode into a
+single Numba-jitted function, batching all buckets — multi-day work.
+
+### Added
+- `bigsmall/codecs/numba_rans.py` — Numba-JIT rANS encoder + decoder
+  primitives. Cache-aware JIT (`@njit(cache=True)`) so first-call
+  compilation is paid once per Python session.
+- `bigsmall/codecs/bf16_tans.py` — BF16 codec built on `numba_rans`.
+  Same SE + per-exp-mantissa structure as `bf16_se_ac`; just a faster
+  entropy coder.
+- New codec name `bf16_se_tans` registered in `codec_registry`.
+- **`compress(..., prefer_speed=True)`** flag opts into the tANS codec
+  with a +0.15% size tolerance (per the measured 0.095pp ratio cost).
+- Decoder dispatch for `bf16_se_tans` routes through the new module.
+
+### Tests
+- `tests/test_tans.py` — 6 new tests: round-trip Gaussian + edge
+  cases, size within spec gate, codec registered, `prefer_speed=True`
+  produces tANS, default doesn't pick tANS.
+- **108 passed / 2 skipped** total (up from 102).
+
+### Compatibility
+- Default `compress()` behavior unchanged (`prefer_speed=False`).
+- All existing .bs files (3.0.0-3.4.0) decode bit-identically.
+- `bf16_se_tans`-encoded files require bigsmall ≥ 3.5.0 (older readers
+  surface `BigSmallVersionError` on unknown codec name).
+- Numba is an existing dependency — no requirements changes.
+
+### What did NOT pan out (honest)
+- Spec target: 5-10x decode. Actual: 2.3x. Cause: per-bucket Python
+  orchestration (~80 small coder calls per tensor) wasn't moved
+  inside the Numba JIT boundary.
+- Streaming inference > 1 token/sec: still ~130 s/token (was 300 s/token
+  in v3.4.0). 2.3x weight-decode speedup is real but the gpu-kernel
+  bottleneck on parallel-stream decoding remains.
+- KV cache < 100ms/attention-pass: ~13s at seq=2000 (down from 30s in
+  3.3.0). Real improvement, not "live inference" territory yet.
+- Cython build path: skipped — no C compiler on this Windows box.
+  Numba JIT achieves the same goal without a build step.
+
 ## [3.4.0] - 2026-05-18
 
 v3.4.0 adds **`bf16_se_rans`**, a new BF16 codec that uses

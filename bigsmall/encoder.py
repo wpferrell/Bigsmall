@@ -98,6 +98,7 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
         (idx, blob, codec_name, extras, special_label)
     """
     enable_gpu_parallel = False  # default
+    prefer_speed = False  # default
     if len(job) == 6:
         # Backwards-compat: older callers (e.g. delta path) pass a 6-tuple.
         idx, kind, fmt, raw, item_bytes, shape = job
@@ -113,9 +114,12 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
         enable_a5 = True
     elif len(job) == 9:
         idx, kind, fmt, raw, item_bytes, shape, dtype, name, enable_a5 = job
-    else:
+    elif len(job) == 10:
         (idx, kind, fmt, raw, item_bytes, shape, dtype, name,
          enable_a5, enable_gpu_parallel) = job
+    else:
+        (idx, kind, fmt, raw, item_bytes, shape, dtype, name,
+         enable_a5, enable_gpu_parallel, prefer_speed) = job
 
     # Special codecs come first -- their pattern detection runs before
     # auto-select and they always win when they apply.
@@ -143,6 +147,7 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
         shape=tuple(shape) if shape else (), item_bytes=item_bytes,
         enable_a5=enable_a5,
         enable_gpu_parallel=enable_gpu_parallel,
+        prefer_speed=prefer_speed,
     )
     if codec_name == "bf16_sparsity_v1":
         special_label = "a5_sparsity"
@@ -292,7 +297,8 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
              workers: Optional[int] = None, progress: bool = True,
              exclude_names: Optional[set[str]] = None,
              enable_a5: bool = True,
-             gpu_optimised: bool = False) -> str:
+             gpu_optimised: bool = False,
+             prefer_speed: bool = False) -> str:
     """Compress a safetensors file into a .bs container.
 
     Args:
@@ -352,7 +358,7 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
         # name through so the sparsity scanner can read the dtype string.
         jobs.append((
             i, kind, t["fmt"], t["raw"], t["item_bytes"], t["shape"],
-            t["dtype"], t["name"], enable_a5, gpu_optimised,
+            t["dtype"], t["name"], enable_a5, gpu_optimised, prefer_speed,
         ))
 
     pbar = None

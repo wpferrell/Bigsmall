@@ -103,12 +103,53 @@ def _shard_output_name(src_shard: Path, shard_idx: int, total: int) -> str:
 # ---------------------- public API ------------------------------------------
 
 
+def _scan_cross_shard_duplicates(shards: list[Path]) -> dict[str, dict]:
+    """Scan every tensor across `shards` for md5-identical duplicates.
+
+    The first occurrence (by shard order, then tensor order within a shard) of
+    each (shape, dtype, md5) key is the master; later occurrences are recorded
+    as duplicates pointing to the master.
+
+    Returns:
+        `{dup_name: {"master": master_name}}` -- the same shape used by
+        `bigsmall.index.json:duplicate_map`. Empty if no duplicates.
+    """
+    import hashlib
+    from safetensors import safe_open
+
+    seen: dict[tuple, str] = {}
+    duplicates: dict[str, dict] = {}
+    for shard in shards:
+        with safe_open(str(shard), framework="pt") as f:
+            for name in f.keys():
+                t = f.get_tensor(name)
+                shape = tuple(t.shape)
+                dtype = str(t.dtype).replace("torch.", "")
+                try:
+                    import torch
+                    raw = t.contiguous().view(torch.uint8).cpu().numpy().tobytes()
+                except Exception:
+                    raw = bytes(t.cpu().numpy().tobytes())
+                if len(raw) < 1024:
+                    # Tiny tensors are below the threshold where saving a copy
+                    # offsets the duplicate-map overhead. Match the in-shard
+                    # tied-detection threshold from tensor_analysis.
+                    continue
+                key = (shape, dtype, hashlib.md5(raw).hexdigest())
+                if key in seen:
+                    duplicates[name] = {"master": seen[key]}
+                else:
+                    seen[key] = name
+    return duplicates
+
+
 def compress_for_hub(source: str | Path,
                      output_dir: str | Path,
                      mode: str = "balanced",
                      workers: Optional[int] = None,
                      include_configs: bool = True,
-                     overwrite: bool = False) -> str:
+                     overwrite: bool = False,
+                     dedupe_cross_shard: bool = True) -> str:
     """Compress an entire HF model (local dir or repo ID) for Hub upload.
 
     Args:
@@ -118,6 +159,9 @@ def compress_for_hub(source: str | Path,
         workers: per-tensor worker count for encoding. None -> default.
         include_configs: copy config.json / tokenizer files alongside the .bs files.
         overwrite: clear output_dir first if it already exists.
+        dedupe_cross_shard: scan all tensors across all shards for md5
+            duplicates (e.g. lm_head tied to embed_tokens) and store only one
+            copy. The duplicate aliases live in `bigsmall.index.json`.
 
     Returns:
         Absolute path to output_dir.
@@ -136,16 +180,29 @@ def compress_for_hub(source: str | Path,
     if not shards:
         raise FileNotFoundError(f"No *.safetensors files found under {src_dir}")
 
+    duplicate_map: dict[str, dict] = {}
+    if dedupe_cross_shard:
+        duplicate_map = _scan_cross_shard_duplicates(shards)
+        if duplicate_map:
+            print(
+                f"[bigsmall] found {len(duplicate_map)} cross-shard tied tensors; "
+                f"will dedupe ({sorted(duplicate_map)[:3]}...)",
+                flush=True,
+            )
+
+    exclude_set = set(duplicate_map.keys())
+
     total = len(shards)
     bs_paths: list[Path] = []
     for i, shard in enumerate(shards, start=1):
         out_name = _shard_output_name(shard, i, total)
         dst = out_dir / out_name
         print(f"[bigsmall] compressing shard {i}/{total}: {shard.name} -> {out_name}", flush=True)
-        encoder.compress(shard, dst, mode=mode, workers=workers)
+        encoder.compress(shard, dst, mode=mode, workers=workers,
+                         exclude_names=exclude_set)
         bs_paths.append(dst)
 
-    hub_index.write_index(out_dir, bs_paths)
+    hub_index.write_index(out_dir, bs_paths, duplicate_map=duplicate_map)
 
     if include_configs:
         for name in os.listdir(src_dir):
@@ -446,9 +503,11 @@ def from_pretrained(repo_or_path: str | Path,
         raise FileNotFoundError(f"Path not found: {local}")
 
     index_path = local / hub_index.INDEX_FILENAME
+    duplicate_map: dict[str, dict] = {}
     if index_path.exists():
         index = hub_index.read_index(local)
         shards = hub_index.shard_paths_from_index(local, index=index)
+        duplicate_map = (index.get("metadata") or {}).get("duplicate_map") or {}
     else:
         shards = sorted(local.glob("*.bs"))
         if not shards:
@@ -483,5 +542,16 @@ def from_pretrained(repo_or_path: str | Path,
 
     if shard_bar is not None:
         shard_bar.close()
+
+    # Materialise cross-shard tied weights -- the duplicate tensor lives only
+    # in the index, not in any shard. Aliasing the master tensor (not copying)
+    # preserves storage sharing if the master is a torch tensor.
+    for dup_name, info in duplicate_map.items():
+        master_name = info.get("master") if isinstance(info, dict) else None
+        if not master_name or master_name not in state_dict:
+            continue
+        if dup_name in state_dict:
+            continue
+        state_dict[dup_name] = state_dict[master_name]
 
     return state_dict

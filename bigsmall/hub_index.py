@@ -36,12 +36,17 @@ INDEX_FILENAME = "bigsmall.index.json"
 
 
 def build_index(shard_paths: list[str | Path],
-                model_type: str | None = None) -> dict[str, Any]:
+                model_type: str | None = None,
+                duplicate_map: dict[str, dict] | None = None) -> dict[str, Any]:
     """Walk a list of .bs shard files and produce the index dict.
 
     Args:
         shard_paths: list of .bs files in the order they should appear.
         model_type: optional override; otherwise read from the first shard.
+        duplicate_map: optional `{dup_name: {"master": str}}` recording
+                       cross-shard tied-weight aliases. The duplicate tensors
+                       are NOT present in any shard's header; the decoder
+                       materialises them by aliasing the master tensor.
 
     Returns:
         Index dict ready to json.dump.
@@ -94,28 +99,42 @@ def build_index(shard_paths: list[str | Path],
     except Exception:
         bs_version = "unknown"
 
+    dup_map = duplicate_map or {}
+    # Duplicate aliases participate in the public tensor count and the weight map
+    # so consumers can locate them without needing to know about the dedup.
+    for dup_name, info in dup_map.items():
+        master = info.get("master")
+        if master in weight_map and dup_name not in weight_map:
+            weight_map[dup_name] = weight_map[master]
+
+    metadata = {
+        "bigsmall_version": str(bs_version),
+        "container_version": next(iter(container_versions)),
+        "format": fmt,
+        "mode": mode,
+        "model_type": mtype,
+        "total_size": total_size,
+        "total_raw_size": total_raw_size,
+        "ratio_pct": ratio,
+        "shard_count": len(shard_paths),
+        "tensor_count": tensor_count + len(dup_map),
+        "stored_tensor_count": tensor_count,
+        "shards": [p.name for p in shard_paths],
+    }
+    if dup_map:
+        metadata["duplicate_map"] = dup_map
     return {
-        "metadata": {
-            "bigsmall_version": str(bs_version),
-            "container_version": next(iter(container_versions)),
-            "format": fmt,
-            "mode": mode,
-            "model_type": mtype,
-            "total_size": total_size,
-            "total_raw_size": total_raw_size,
-            "ratio_pct": ratio,
-            "shard_count": len(shard_paths),
-            "tensor_count": tensor_count,
-            "shards": [p.name for p in shard_paths],
-        },
+        "metadata": metadata,
         "weight_map": weight_map,
     }
 
 
 def write_index(directory: str | Path, shard_paths: list[str | Path],
-                model_type: str | None = None) -> Path:
+                model_type: str | None = None,
+                duplicate_map: dict[str, dict] | None = None) -> Path:
     """Build and write bigsmall.index.json into directory. Returns the path."""
-    index = build_index(shard_paths, model_type=model_type)
+    index = build_index(shard_paths, model_type=model_type,
+                        duplicate_map=duplicate_map)
     out = Path(directory) / INDEX_FILENAME
     with open(out, "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2, sort_keys=False)

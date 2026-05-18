@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import platform
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
@@ -41,10 +42,24 @@ _FORMAT_CODECS = {
 }
 
 
+# Tensors at or below this byte count are stored uncompressed (codec="raw").
+# Header bytes spent on a codec stub dominate the body for tiny bias / norm
+# entries, so the round-trip costs us bytes once you account for the JSON
+# overhead in the .bs header. 512 keeps norm scales (typically 4 KiB or more
+# at fp32) on the codec path while shortcutting biases that are O(hidden) at
+# bf16, i.e. a few hundred bytes.
+RAW_TINY_THRESHOLD = 512
+
+
 def _default_workers() -> int:
     """Pick a sane default worker count.
 
-    Override with env var BIGSMALL_WORKERS. Set to 1 to force serial.
+    Platform default:
+      Windows  -> 1 (multiprocessing here costs more than it saves and the
+                     spawn-import side-effects regularly break user setups)
+      Linux/macOS -> min(cpu_count, 8) using fork-style multiprocessing
+
+    Override at any time with the BIGSMALL_WORKERS environment variable.
     """
     env = os.environ.get("BIGSMALL_WORKERS")
     if env is not None:
@@ -52,6 +67,8 @@ def _default_workers() -> int:
             return max(1, int(env))
         except ValueError:
             pass
+    if platform.system() == "Windows":
+        return 1
     return min(os.cpu_count() or 1, 8)
 
 
@@ -227,7 +244,8 @@ def _encode_special(t: dict, kind: str) -> tuple[bytes, str, dict]:
 
 
 def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
-             workers: Optional[int] = None, progress: bool = True) -> str:
+             workers: Optional[int] = None, progress: bool = True,
+             exclude_names: Optional[set[str]] = None) -> str:
     """Compress a safetensors file into a .bs container.
 
     Args:
@@ -238,11 +256,18 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
         workers: number of parallel worker processes for per-tensor encoding.
                  None (default) -> min(cpu_count, 8) or BIGSMALL_WORKERS env var.
                  1 -> serial encoding (no process pool overhead).
+        exclude_names: tensor names to skip entirely (used by `compress_for_hub`
+                       for cross-shard tied-weight deduplication). Excluded
+                       tensors do not appear in the resulting .bs file at all;
+                       reconstruction is the caller's responsibility (via
+                       `bigsmall.index.json:duplicate_map`).
 
     Returns: dst as string.
     """
     src = Path(src); dst = Path(dst)
     tensors, st_meta = _gather_tensors(src)
+    if exclude_names:
+        tensors = [t for t in tensors if t["name"] not in exclude_names]
 
     # Pick dominant format for the header label
     dominant_fmt = "bf16"
@@ -272,6 +297,9 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
             master_idx = decisions[i]["tied_to"]
             encoded[i] = (b"", "tied_ref", {"tied_to": tensors[master_idx]["name"]}, "tied")
             continue
+        if len(t["raw"]) < RAW_TINY_THRESHOLD:
+            encoded[i] = (t["raw"], "raw", {"n_bytes": len(t["raw"])}, None)
+            continue
         jobs.append((i, kind, t["fmt"], t["raw"], t["item_bytes"], t["shape"]))
 
     pbar = None
@@ -296,10 +324,16 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
         pbar.set_postfix_str(f"{t['name'][:48]} ratio={ratio:.1f}%")
         pbar.update(1)
 
-    # Account tied entries (no compute) upfront
+    # Account tied entries (no compute) upfront. Raw-tiny entries skip the
+    # worker pool entirely; account them here too so the progress bar matches
+    # the actual write order.
     for i, t in enumerate(tensors):
         if decisions[i]["kind"] == "tied":
             _account_progress(i, b"", t)
+        elif i in encoded:
+            blob, codec_name, _extras, _special = encoded[i]
+            if codec_name == "raw":
+                _account_progress(i, blob, t)
 
     if workers <= 1 or len(jobs) <= 1:
         # Serial path - avoid process pool overhead for tiny models / tests

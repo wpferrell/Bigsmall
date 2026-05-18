@@ -95,11 +95,13 @@ class StreamingLoader:
     def _build_index(self) -> None:
         """Walk shard(s), read headers, build name->entry and layer maps."""
         shard_paths: list[Path]
+        duplicate_map: dict[str, dict] = {}
         if self.path.is_dir():
             index_file = self.path / hub_index.INDEX_FILENAME
             if index_file.exists():
                 idx = hub_index.read_index(self.path)
                 shard_paths = hub_index.shard_paths_from_index(self.path, index=idx)
+                duplicate_map = (idx.get("metadata") or {}).get("duplicate_map") or {}
             else:
                 shard_paths = sorted(self.path.glob("*.bs"))
                 if not shard_paths:
@@ -126,6 +128,21 @@ class StreamingLoader:
                     self._non_layer.append(name)
                 else:
                     self._layers.setdefault(li, []).append(name)
+
+        # Register cross-shard duplicate aliases. Each duplicate shares its
+        # master's _TensorEntry so reads transparently decode the master.
+        for dup_name, info in duplicate_map.items():
+            master_name = info.get("master") if isinstance(info, dict) else None
+            if not master_name or master_name not in self._index:
+                continue
+            if dup_name in self._index:
+                continue
+            self._index[dup_name] = self._index[master_name]
+            li = layer_index(dup_name)
+            if li is None:
+                self._non_layer.append(dup_name)
+            else:
+                self._layers.setdefault(li, []).append(dup_name)
 
     # ---------------------- file-handle pool --------------------------------
 

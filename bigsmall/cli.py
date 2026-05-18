@@ -1,5 +1,6 @@
 """BigSmall command-line interface."""
 import argparse
+import multiprocessing
 import os
 import sys
 import time
@@ -131,6 +132,30 @@ def _cmd_benchmark(args):
     print(f"  ratio:      {pct:.2f}% ({src_size:,} -> {dst_size:,})")
 
 
+def _cmd_pipeline_run(args):
+    from .pipeline import Pipeline
+    p = Pipeline(
+        source=args.source,
+        dst_dir=args.dst_dir,
+        repo_id=args.repo_id,
+        mode=args.mode,
+        token=args.token,
+        workers=args.workers,
+        use_lfs_upload=args.lfs,
+    )
+    p.run(do_compress=args.compress, do_upload=args.upload)
+
+
+def _cmd_pipeline_status(args):
+    import json as _json
+    from .pipeline import Pipeline, CHECKPOINT_FILENAME
+    cp = Path(args.dst_dir) / CHECKPOINT_FILENAME
+    if not cp.exists():
+        print(f"No pipeline checkpoint at {cp}")
+        sys.exit(1)
+    print(cp.read_text(encoding="utf-8"))
+
+
 def _resolve_hf_token(explicit: str | None = None) -> str | None:
     if explicit:
         return explicit
@@ -144,6 +169,42 @@ def _resolve_hf_token(explicit: str | None = None) -> str | None:
         except OSError:
             return None
     return None
+
+
+def _scan_local_compressed_models(local_dirs):
+    """Find directories under each local_dir that contain bigsmall.index.json."""
+    found = []
+    for d in local_dirs:
+        root = Path(d)
+        if not root.exists() or not root.is_dir():
+            continue
+        for idx in root.rglob("bigsmall.index.json"):
+            model_dir = idx.parent
+            shards = sorted(model_dir.glob("*.bs"))
+            total_bytes = sum(s.stat().st_size for s in shards)
+            found.append({
+                "path": str(model_dir),
+                "shards": len(shards),
+                "shard_names": [s.name for s in shards],
+                "total_bytes": total_bytes,
+            })
+    return found
+
+
+def _diff_local_vs_remote(local_shard_names, remote_shard_sizes):
+    """Return shard names present locally but missing or size-mismatched remotely."""
+    missing = []
+    for name in local_shard_names:
+        if name not in remote_shard_sizes:
+            missing.append({"name": name, "reason": "absent_remote"})
+    return missing
+
+
+def _estimate_upload_seconds(total_bytes, mb_per_sec=10.0):
+    """Coarse ETA at a conservative HF upload throughput."""
+    if total_bytes <= 0:
+        return 0.0
+    return total_bytes / (mb_per_sec * 1024 * 1024)
 
 
 def _cmd_status(args):
@@ -174,15 +235,12 @@ def _cmd_status(args):
         matches.append(repo_id)
     matches.sort()
 
-    if not matches:
-        print(f"No repos matching {user}/*{suffix} found.")
-        return
-
-    rows = []
+    # Build remote info dictionary
+    remote: dict[str, dict] = {}
     for repo_id in matches:
-        shards = 0
-        total_bytes = 0
+        shard_sizes: dict[str, int] = {}
         has_readme = False
+        err = None
         try:
             info = api.repo_info(repo_id=repo_id, repo_type="model", files_metadata=True)
             siblings = getattr(info, "siblings", None) or []
@@ -190,29 +248,107 @@ def _cmd_status(args):
                 name = getattr(s, "rfilename", None) or ""
                 size = getattr(s, "size", None) or 0
                 if name.endswith(".bs"):
-                    shards += 1
-                    if size:
-                        total_bytes += int(size)
+                    shard_sizes[name] = int(size) if size else 0
                 if name.lower() == "readme.md":
                     has_readme = True
         except Exception as e:
-            rows.append((repo_id, "?", "?", "?", f"err: {e}"))
-            continue
-        gb = total_bytes / (1024 ** 3)
-        rows.append((repo_id, str(shards), f"{gb:.2f}", "yes" if has_readme else "no", ""))
+            err = str(e)
+        remote[repo_id] = {
+            "shards": shard_sizes,
+            "readme": has_readme,
+            "error": err,
+        }
 
-    name_w = max(len("repo"), max(len(r[0]) for r in rows))
-    shard_w = max(len("shards"), max(len(r[1]) for r in rows))
-    gb_w = max(len("GB"), max(len(r[2]) for r in rows))
-    readme_w = max(len("readme"), max(len(r[3]) for r in rows))
-    header = f"{'repo':<{name_w}}  {'shards':>{shard_w}}  {'GB':>{gb_w}}  {'readme':>{readme_w}}"
-    print(header)
-    print("-" * len(header))
-    for repo_id, shards, gb, readme, err in rows:
-        line = f"{repo_id:<{name_w}}  {shards:>{shard_w}}  {gb:>{gb_w}}  {readme:>{readme_w}}"
-        if err:
-            line += f"  {err}"
-        print(line)
+    # Scan local compressed dirs
+    if args.local_dirs is None:
+        default_local = os.environ.get("BIGSMALL_TMP", r"C:\tmp\bs_out")
+        local_dirs = [default_local]
+    else:
+        local_dirs = list(args.local_dirs)
+    local_models = _scan_local_compressed_models(local_dirs)
+
+    if args.as_json:
+        import json as _json
+        report = {
+            "user": user,
+            "suffix": suffix,
+            "remote": [
+                {
+                    "repo_id": rid,
+                    "shards": len(info["shards"]),
+                    "total_bytes": sum(info["shards"].values()),
+                    "readme": info["readme"],
+                    "error": info["error"],
+                }
+                for rid, info in sorted(remote.items())
+            ],
+            "local": local_models,
+        }
+        # Add a missing-shards diff: for each remote repo, what local model
+        # has shards not yet on the Hub?
+        diffs = []
+        for lm in local_models:
+            best_match = None
+            for rid in remote:
+                # Heuristic match: trailing path segment of lm['path']
+                # matches the trailing path of rid (everything after '/')
+                if Path(lm["path"]).name.replace("_", "-").lower() in rid.lower():
+                    best_match = rid
+                    break
+            if best_match is None:
+                continue
+            missing = _diff_local_vs_remote(lm["shard_names"], remote[best_match]["shards"])
+            if missing:
+                diffs.append({
+                    "repo_id": best_match,
+                    "local_path": lm["path"],
+                    "missing_shards": missing,
+                    "eta_seconds": _estimate_upload_seconds(
+                        sum(lm["total_bytes"] for _ in [None])  # whole-model proxy
+                    ),
+                })
+        report["pending_uploads"] = diffs
+        print(_json.dumps(report, indent=2))
+        return
+
+    # Text table mode
+    if not matches and not local_models:
+        print(f"No repos matching {user}/*{suffix} and no local compressed models.")
+        return
+
+    if matches:
+        rows = []
+        for repo_id in matches:
+            info = remote[repo_id]
+            if info["error"] is not None:
+                rows.append((repo_id, "?", "?", "?", f"err: {info['error']}"))
+                continue
+            n = len(info["shards"])
+            gb = sum(info["shards"].values()) / (1024 ** 3)
+            rows.append((repo_id, str(n), f"{gb:.2f}",
+                         "yes" if info["readme"] else "no", ""))
+        name_w = max(len("repo"), max(len(r[0]) for r in rows))
+        shard_w = max(len("shards"), max(len(r[1]) for r in rows))
+        gb_w = max(len("GB"), max(len(r[2]) for r in rows))
+        readme_w = max(len("readme"), max(len(r[3]) for r in rows))
+        header = f"{'repo':<{name_w}}  {'shards':>{shard_w}}  {'GB':>{gb_w}}  {'readme':>{readme_w}}"
+        print(header)
+        print("-" * len(header))
+        for repo_id, shards, gb, readme, err in rows:
+            line = f"{repo_id:<{name_w}}  {shards:>{shard_w}}  {gb:>{gb_w}}  {readme:>{readme_w}}"
+            if err:
+                line += f"  {err}"
+            print(line)
+
+    if local_models:
+        print("")
+        print(f"Local compressed models ({len(local_models)} found in: {', '.join(local_dirs)})")
+        print("-" * 70)
+        for lm in local_models:
+            gb = lm["total_bytes"] / (1024 ** 3)
+            eta = _estimate_upload_seconds(lm["total_bytes"])
+            print(f"  {lm['path']}")
+            print(f"    {lm['shards']} shards  {gb:.2f} GB  upload ETA ~{eta/60:.1f} min")
 
 
 def main(argv=None):
@@ -253,11 +389,36 @@ def main(argv=None):
     s.add_argument("--suffix", default="-bigsmall",
                    help="Only list repos whose name ends with this suffix (default: -bigsmall)")
     s.add_argument("--token", default=None, help="HF token override")
+    s.add_argument("--local-dirs", default=None, nargs="*",
+                   help="Directories to scan for local compressed models (default: $BIGSMALL_TMP or C:/tmp/bs_out)")
+    s.add_argument("--json", dest="as_json", action="store_true",
+                   help="Emit a machine-readable JSON report instead of a table")
     s.set_defaults(func=_cmd_status)
+
+    p_pipe = sub.add_parser("pipeline", help="Resumable compress + upload pipeline")
+    pp_sub = p_pipe.add_subparsers(dest="pipeline_cmd", required=True)
+    p_run = pp_sub.add_parser("run", help="Run the pipeline (resumable)")
+    p_run.add_argument("source", help="Local model directory OR HF repo id")
+    p_run.add_argument("dst_dir", help="Output directory for compressed shards")
+    p_run.add_argument("--repo-id", default=None, help="Target HF repo id; required for upload")
+    p_run.add_argument("--no-upload", dest="upload", action="store_false", default=True)
+    p_run.add_argument("--no-compress", dest="compress", action="store_false", default=True)
+    p_run.add_argument("--mode", default="balanced", choices=("storage", "balanced", "inference"))
+    p_run.add_argument("--lfs", action="store_true", help="Use upload_to_hub_lfs")
+    p_run.add_argument("--token", default=None, help="HF token override")
+    p_run.add_argument("--workers", type=int, default=None)
+    p_run.set_defaults(func=_cmd_pipeline_run)
+
+    p_st = pp_sub.add_parser("status", help="Show pipeline checkpoint for a dst_dir")
+    p_st.add_argument("dst_dir")
+    p_st.set_defaults(func=_cmd_pipeline_status)
 
     args = p.parse_args(argv)
     args.func(args)
 
 
 if __name__ == "__main__":
+    # Required for Windows spawn-based multiprocessing when the CLI is frozen
+    # (PyInstaller / cx_Freeze). No-op for a standard `pip install` invocation.
+    multiprocessing.freeze_support()
     main()

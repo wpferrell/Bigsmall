@@ -48,6 +48,8 @@ def _decode_blob(t: dict, blob: bytes) -> bytes:
 
     if codec == "tied_ref":
         return None  # caller must resolve from master tensor
+    if codec == "raw":
+        return blob  # tensor stored uncompressed (tiny tensor short-circuit)
     if codec == "special":
         # n_bytes is total tensor byte length
         # item_bytes from extras

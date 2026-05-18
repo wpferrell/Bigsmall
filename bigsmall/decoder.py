@@ -17,7 +17,8 @@ import numpy as np
 
 from . import container, formats
 from .codecs import (
-    bf16, bf16_sparsity, fp2_residual, fp32, fp16, fp8, fp4,
+    bf16, bf16_sparsity, bf16_parallel, fp2_residual,
+    fp32, fp16, fp8, fp4,
     special as special_codec, generic,
 )
 from .exceptions import BigSmallVersionError
@@ -58,6 +59,11 @@ def _decode_blob(t: dict, blob: bytes) -> bytes:
         return bf16_sparsity.decode(blob, extras, n_weights)
     if codec == "fp2_residual_v1":
         return fp2_residual.decode(blob, extras, n_weights)
+    if codec == "bf16_parallel_v1":
+        # GPU-kernel infrastructure (opt-in via gpu_optimised=True at compress).
+        # The decoder picks CPU/GPU automatically based on `bigsmall.kernels.use_gpu()`.
+        from . import kernels as _kernels
+        return _kernels.decode_bf16_parallel(blob, extras, n_weights)
     if codec == "special":
         # n_bytes is total tensor byte length
         # item_bytes from extras

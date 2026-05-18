@@ -29,7 +29,10 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from . import tensor_analysis as ta
-from .codecs import bf16, bf16_sparsity, fp2_residual, fp32, fp16, fp8, fp4, generic
+from .codecs import (
+    bf16, bf16_sparsity, bf16_parallel, fp2_residual,
+    fp32, fp16, fp8, fp4, generic,
+)
 
 
 # Registry of (encode_fn, decode_fn) keyed by codec name.
@@ -67,6 +70,12 @@ def _enc_fp2_residual(raw, **_):
     return fp2_residual.encode(raw)
 
 
+def _enc_bf16_parallel(raw, n_streams=None, **_):
+    if n_streams is None:
+        return bf16_parallel.encode(raw)
+    return bf16_parallel.encode(raw, n_streams=n_streams)
+
+
 def _enc_fp32(raw, **_):
     return fp32.encode(raw)
 
@@ -99,6 +108,10 @@ def _dec_fp2_residual(blob, extras, n_weights):
     return fp2_residual.decode(blob, extras, n_weights)
 
 
+def _dec_bf16_parallel(blob, extras, n_weights):
+    return bf16_parallel.decode(blob, extras, n_weights)
+
+
 def _dec_fp32(blob, extras, n_weights):
     return fp32.decode(blob, extras, n_weights)
 
@@ -122,6 +135,7 @@ def _dec_zstd(blob, extras, n_weights):
 register_codec("bf16_se_ac", _enc_bf16, _dec_bf16)
 register_codec("bf16_sparsity_v1", _enc_bf16_sparsity, _dec_bf16_sparsity)
 register_codec("fp2_residual_v1", _enc_fp2_residual, _dec_fp2_residual)
+register_codec("bf16_parallel_v1", _enc_bf16_parallel, _dec_bf16_parallel)
 register_codec("fp32_se_ac", _enc_fp32, _dec_fp32)
 register_codec("fp16_se_ac", _enc_fp16, _dec_fp16)
 register_codec("fp8_cat_ac", _enc_fp8, _dec_fp8)
@@ -165,7 +179,10 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
                       shape: tuple = (),
                       item_bytes: int = 0,
                       enable_a5: bool = True,
-                      enable_fp2_residual: bool = True) -> tuple[bytes, str, dict]:
+                      enable_fp2_residual: bool = True,
+                      enable_gpu_parallel: bool = False,
+                      gpu_parallel_n_streams: int = 128,
+                      gpu_parallel_tolerance: float = 0.01) -> tuple[bytes, str, dict]:
     """Try every candidate codec for `fmt` and return the smallest blob.
 
     Args:
@@ -180,6 +197,16 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
         enable_a5:   if False, skip the A5 sparsity candidate entirely (used
                      by the `enable_a5=False` opt-out on `compress()`).
         enable_fp2_residual: if False, skip the V4 B1 FP2+residual candidate.
+        enable_gpu_parallel: when True, additionally try `bf16_parallel_v1`
+            (only for fmt=="bf16"). Per `GPU_KERNEL_CLAUDE.md` spec, the
+            parallel candidate is selected when its size is within
+            `gpu_parallel_tolerance` (default 1%) of the best non-parallel
+            candidate. This is a relaxed safety net relative to "smallest
+            wins" — the parallel codec is *always* slightly larger but
+            opens up future GPU-kernel decoding. Default False (off).
+        gpu_parallel_n_streams: stream count for parallel encoding. Default
+            128. Stored in the blob header so the decoder is self-describing.
+        gpu_parallel_tolerance: relaxed-safety-net fraction. Default 0.01 (+1%).
 
     Returns:
         (best_blob, best_codec_name, best_extras).  Always returns something —
@@ -245,6 +272,27 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
             best_name = name
             best_blob = blob
             best_extras = extras or {}
+
+    # Optional GPU-parallel candidate. Only runs for BF16 tensors AND when
+    # explicitly opted in by the caller. Uses a relaxed safety net (+1pct by
+    # default) instead of strict smallest-wins because parallel is *always*
+    # slightly larger than the joint-entropy floor — its value is GPU
+    # decodability, not compression ratio. See GPU_KERNEL_CLAUDE.md Step 0.
+    if enable_gpu_parallel and fmt == "bf16":
+        try:
+            par_blob, par_extras = bf16_parallel.encode(
+                raw, n_streams=gpu_parallel_n_streams,
+            )
+        except Exception:
+            par_blob = None
+            par_extras = None
+        if par_blob is not None and best_size is not None:
+            tolerance_bytes = int(best_size * (1.0 + gpu_parallel_tolerance))
+            if len(par_blob) <= tolerance_bytes:
+                # Within tolerance — prefer parallel for GPU decodability.
+                best_blob = par_blob
+                best_name = "bf16_parallel_v1"
+                best_extras = par_extras or {}
 
     if best_blob is None:
         # Pathological — every candidate failed.  Last-ditch fallback so we

@@ -1,3 +1,86 @@
+## [3.2.0] - 2026-05-18
+
+v3.2.0 ships GPU-decode infrastructure for BigSmall: a new parallel-stream
+codec, a working Triton GPU kernel, and a streaming inference wrapper.
+
+**Functionality is correct end-to-end; performance is honest infrastructure,
+not yet user-ready.** The GPU kernel decodes ~2x faster than the CPU rANS
+path but is still ~7x slower than the existing constriction `bf16_se_ac`
+codec. Streaming inference on Phi-3.5-mini produces correct output ("Paris"
+for "The capital of France is") at **0.63 GB peak VRAM (12x reduction
+from 7.6 GB BF16)** but takes ~300s per token. Closing the throughput gap
+is multi-week dedicated GPU-kernel optimisation work, on the V4+ roadmap.
+
+### Added
+- **`bf16_parallel_v1` codec** (`bigsmall/codecs/bf16_parallel.py`,
+  `bigsmall/codecs/rans.py`). N interleaved slices, each rANS-encoded
+  using SHARED probability tables (one global SE histogram + one
+  per-exp mantissa histogram from the full tensor). Format is fully
+  GPU-portable — bitstream layout chosen so the per-stream decode can
+  run independently on GPU thread blocks. Default N_STREAMS=128.
+- **Triton GPU kernel** (`bigsmall/kernels/ac_triton.py`). One Triton
+  program per stream decodes the SE substream on GPU. Mantissa decode
+  remains on CPU in v1 (per-exp dispatch is straightforward to port in
+  v2; not done here to keep the v3.2.0 shipping window small).
+- **Auto-fallback kernel wrapper** (`bigsmall/kernels/__init__.py`).
+  Picks CUDA-C ext > Triton > CPU at decode time, no user config needed.
+  `BIGSMALL_FORCE_CPU=1` env var disables GPU even when available.
+- **Streaming inference wrapper** (`bigsmall/streaming_inference.py`).
+  `BigSmallStreamingModel.from_pretrained(bs_path, hf_config_path)`
+  builds an HF nn.Module with `init_empty_weights`, materialises only
+  the non-layer tensors, and patches each transformer layer's forward
+  to load weights on demand from the StreamingLoader, run, then free.
+  Peak VRAM is bounded by `non_layer_weights + activations + one layer`.
+- **`compress(..., gpu_optimised=True)` flag**. Adds the parallel codec
+  to `auto_select_codec` as a candidate with a +1% size tolerance (per
+  spec) so the codec wins on big tensors where the +0.07-0.34pp cost
+  is within tolerance. Default `gpu_optimised=False` — no behaviour change
+  for existing users.
+
+### Tests
+- `tests/test_bf16_parallel.py` (6 tests, already in 3.1.0): lossless
+  round-trip on Gaussian + edge cases, codec in registry, ratio cost
+  under spec gate at N=256, end-to-end with `compress(gpu_optimised=True)`,
+  default does not pick parallel.
+- `tests/test_gpu_kernel.py` (4 tests): Triton lossless md5 against CPU
+  decoder, backend probe picks GPU when CUDA+Triton present, `BIGSMALL_FORCE_CPU`
+  disables GPU, end-to-end with kernel path.
+- `tests/test_streaming_inference.py` (4 tests): module imports,
+  `_set_param_data` swaps params, nested ModuleList index walks,
+  prefix template formatting.
+
+### Empirical findings (Phi-3.5-mini, real model tensors)
+- **Ratio cost** of `bf16_parallel_v1` at N=128: +0.07-0.34 pp on
+  attention + MLP tensors vs single-stream baseline (within spec's
+  +1% tolerance gate). Tiny norm tensors blow up to +20-200pp at N=256
+  because per-stream framing dwarfs per-element AC content — the
+  smallest-wins safety net automatically rejects parallel for those.
+- **GPU decode throughput** (Triton, SE on GPU + mantissa on CPU, N=128
+  streams, RTX A4500): 2.4 MB/s on a 100 MB mlp.down_proj tensor.
+  CPU rANS baseline: 1.2 MB/s. CPU constriction `bf16_se_ac`: 17 MB/s.
+- **Streaming inference**, Phi-3.5-mini, prompt "The capital of France is":
+  output "The capital of France is Paris." Peak VRAM 0.63 GB (vs 7.64 GB
+  standard, 12.1x reduction). Generate time 300s/token, dominated by
+  CPU-side mantissa decode. Standard BF16 inference (full model loaded)
+  is ~0.5s/token, so streaming is ~600x slower.
+
+### Compatibility
+- All existing tests still pass (91/2 skipped, up from 83/2).
+- Files written by 3.1.0 read identically by 3.2.0.
+- Files using `bf16_parallel_v1` require bigsmall >= 3.2.0; older
+  builds surface `BigSmallVersionError` via the existing
+  unknown-codec handler.
+
+### Known limitations (deliberate; not blocking ship)
+- Mantissa decode is still on CPU in the GPU kernel path. Porting it
+  is straightforward; left for a focused v3.3.0 / v4 session.
+- GPU kernel has BLOCK_SIZE=1 (one thread per program). Warp-cooperative
+  decode (32 threads cooperating on one stream's AC state) is the next
+  optimisation; multi-week research project.
+- Streaming inference target of "tokens/sec > 50% of standard BF16"
+  is NOT met (currently ~0.17%). The 50% VRAM-reduction target IS met
+  (12x reduction observed). See `research/gpu_kernel/streaming_benchmark.json`.
+
 ## [3.1.0] - 2026-05-18
 
 v3.1.0 ships the V4 Session B codec infrastructure: two new lossless

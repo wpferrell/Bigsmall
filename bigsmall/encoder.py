@@ -82,17 +82,22 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
     Picklable so it works with ProcessPoolExecutor on Windows (spawn).
 
     Args (job tuple):
-        idx, kind, fmt, raw, item_bytes, shape, dtype, name, enable_a5
+        idx, kind, fmt, raw, item_bytes, shape, dtype, name, enable_a5,
+        [enable_gpu_parallel]  (optional 10th element, default False)
         - dtype: safetensors dtype string ("BF16", "F32", ...); auto-select
           forwards it to the sparsity-stat scanner.
         - name: tensor name; forwarded as context for future codec wrappers.
         - enable_a5: bool. When False, the auto-select dispatcher skips the
           A5 (bf16_sparsity_v1) candidate entirely.  When True, A5 is added
           to the BF16 candidate list and the smallest blob wins.
+        - enable_gpu_parallel: bool. When True, auto-select additionally
+          tries `bf16_parallel_v1` with a +1pct tolerance safety net (per
+          GPU_KERNEL_CLAUDE.md). Default False.
 
     Returns:
         (idx, blob, codec_name, extras, special_label)
     """
+    enable_gpu_parallel = False  # default
     if len(job) == 6:
         # Backwards-compat: older callers (e.g. delta path) pass a 6-tuple.
         idx, kind, fmt, raw, item_bytes, shape = job
@@ -106,8 +111,11 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
         dtype = "BF16" if fmt == "bf16" else fmt.upper()
         name = ""
         enable_a5 = True
-    else:
+    elif len(job) == 9:
         idx, kind, fmt, raw, item_bytes, shape, dtype, name, enable_a5 = job
+    else:
+        (idx, kind, fmt, raw, item_bytes, shape, dtype, name,
+         enable_a5, enable_gpu_parallel) = job
 
     # Special codecs come first -- their pattern detection runs before
     # auto-select and they always win when they apply.
@@ -134,11 +142,14 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
         raw, fmt=fmt, dtype=dtype, tensor_name=name,
         shape=tuple(shape) if shape else (), item_bytes=item_bytes,
         enable_a5=enable_a5,
+        enable_gpu_parallel=enable_gpu_parallel,
     )
     if codec_name == "bf16_sparsity_v1":
         special_label = "a5_sparsity"
     elif codec_name == "fp2_residual_v1":
         special_label = "fp2_residual"
+    elif codec_name == "bf16_parallel_v1":
+        special_label = "gpu_parallel"
     else:
         special_label = None
     return idx, blob, codec_name, extras, special_label
@@ -280,7 +291,8 @@ def _encode_special(t: dict, kind: str) -> tuple[bytes, str, dict]:
 def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
              workers: Optional[int] = None, progress: bool = True,
              exclude_names: Optional[set[str]] = None,
-             enable_a5: bool = True) -> str:
+             enable_a5: bool = True,
+             gpu_optimised: bool = False) -> str:
     """Compress a safetensors file into a .bs container.
 
     Args:
@@ -340,7 +352,7 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
         # name through so the sparsity scanner can read the dtype string.
         jobs.append((
             i, kind, t["fmt"], t["raw"], t["item_bytes"], t["shape"],
-            t["dtype"], t["name"], enable_a5,
+            t["dtype"], t["name"], enable_a5, gpu_optimised,
         ))
 
     pbar = None
@@ -426,8 +438,9 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
     }
     # Promote container to v2 whenever any tensor used a v2-only codec.
     # A5 (bf16_sparsity_v1) was the first; FP2+residual (V4 B1) is the
-    # second. Add future v2-only codecs to this set.
-    v2_codecs = {"bf16_sparsity_v1", "fp2_residual_v1"}
+    # second; bf16_parallel_v1 (GPU-kernel infrastructure, opt-in via
+    # gpu_optimised=True) is the third. Add future v2-only codecs to this set.
+    v2_codecs = {"bf16_sparsity_v1", "fp2_residual_v1", "bf16_parallel_v1"}
     used_v2 = any(t["codec"] in v2_codecs for t in header_tensors)
     target_version = BS_FORMAT_VERSION_V2 if used_v2 else BS_FORMAT_VERSION_V1
     container.write_container(dst, header, data_buf.getvalue(),

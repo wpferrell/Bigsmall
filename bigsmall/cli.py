@@ -1,5 +1,6 @@
 """BigSmall command-line interface."""
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -130,6 +131,90 @@ def _cmd_benchmark(args):
     print(f"  ratio:      {pct:.2f}% ({src_size:,} -> {dst_size:,})")
 
 
+def _resolve_hf_token(explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit
+    tok = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if tok:
+        return tok
+    token_path = Path.home() / ".huggingface" / "token"
+    if token_path.exists():
+        try:
+            return token_path.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            return None
+    return None
+
+
+def _cmd_status(args):
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:
+        print("huggingface_hub is required: pip install huggingface_hub", flush=True)
+        sys.exit(1)
+
+    token = _resolve_hf_token(args.token)
+    api = HfApi(token=token)
+    user = args.user
+
+    try:
+        models = list(api.list_models(author=user))
+    except Exception as e:
+        print(f"Failed to list models for {user!r}: {e}", flush=True)
+        sys.exit(1)
+
+    suffix = args.suffix
+    matches = []
+    for m in models:
+        repo_id = getattr(m, "id", None) or getattr(m, "modelId", None)
+        if not repo_id:
+            continue
+        if not repo_id.endswith(suffix):
+            continue
+        matches.append(repo_id)
+    matches.sort()
+
+    if not matches:
+        print(f"No repos matching {user}/*{suffix} found.")
+        return
+
+    rows = []
+    for repo_id in matches:
+        shards = 0
+        total_bytes = 0
+        has_readme = False
+        try:
+            info = api.repo_info(repo_id=repo_id, repo_type="model", files_metadata=True)
+            siblings = getattr(info, "siblings", None) or []
+            for s in siblings:
+                name = getattr(s, "rfilename", None) or ""
+                size = getattr(s, "size", None) or 0
+                if name.endswith(".bs"):
+                    shards += 1
+                    if size:
+                        total_bytes += int(size)
+                if name.lower() == "readme.md":
+                    has_readme = True
+        except Exception as e:
+            rows.append((repo_id, "?", "?", "?", f"err: {e}"))
+            continue
+        gb = total_bytes / (1024 ** 3)
+        rows.append((repo_id, str(shards), f"{gb:.2f}", "yes" if has_readme else "no", ""))
+
+    name_w = max(len("repo"), max(len(r[0]) for r in rows))
+    shard_w = max(len("shards"), max(len(r[1]) for r in rows))
+    gb_w = max(len("GB"), max(len(r[2]) for r in rows))
+    readme_w = max(len("readme"), max(len(r[3]) for r in rows))
+    header = f"{'repo':<{name_w}}  {'shards':>{shard_w}}  {'GB':>{gb_w}}  {'readme':>{readme_w}}"
+    print(header)
+    print("-" * len(header))
+    for repo_id, shards, gb, readme, err in rows:
+        line = f"{repo_id:<{name_w}}  {shards:>{shard_w}}  {gb:>{gb_w}}  {readme:>{readme_w}}"
+        if err:
+            line += f"  {err}"
+        print(line)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="bigsmall", description="BigSmall lossless NN weight compression")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -162,6 +247,13 @@ def main(argv=None):
     b = sub.add_parser("benchmark", help="Encode/decode benchmark for a model")
     b.add_argument("src")
     b.set_defaults(func=_cmd_benchmark)
+
+    s = sub.add_parser("status", help="List BigSmall repos on HuggingFace")
+    s.add_argument("--user", default="wpferrell", help="HF username (default: wpferrell)")
+    s.add_argument("--suffix", default="-bigsmall",
+                   help="Only list repos whose name ends with this suffix (default: -bigsmall)")
+    s.add_argument("--token", default=None, help="HF token override")
+    s.set_defaults(func=_cmd_status)
 
     args = p.parse_args(argv)
     args.func(args)

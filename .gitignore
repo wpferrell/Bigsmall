@@ -76,3 +76,8 @@ claude_launch.log
 # Local-only Claude/run helpers
 .claude/
 run_claude.bat
+
+V3_ROADMAP.md
+ROADMAP*.md
+*_PRIVATE*
+

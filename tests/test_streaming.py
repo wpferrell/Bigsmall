@@ -1,17 +1,14 @@
-"""Streaming loader tests (Phase 4 cont.).
+"""StreamingLoader tests on a synthetic transformer-shaped model.
 
-Three tests on GPT-2:
- 1. test_streaming_layer_count                 - layer_count() == 12 for GPT-2.
- 2. test_streaming_md5_roundtrip_all_layers    - iterate every layer, md5 every
-    tensor vs the source safetensors.
- 3. test_streaming_inference_identical_to_full - StreamingGPT2.generate_greedy
-    output equals GPT2LMHeadModel.generate output (same ids, greedy).
+We build a tiny multi-layer state-dict with the `model.layers.N.<...>` naming
+convention the StreamingLoader recognises, compress it via `compress_for_hub`,
+then iterate the resulting .bs through `StreamingLoader` and check that every
+decompressed tensor is byte-identical to the source.
+
+The original GPT-2 specific test (`StreamingGPT2.generate_greedy` vs.
+`GPT2LMHeadModel.generate`) is retained but skipped when GPT-2 is not present
+in the local HF cache.
 """
-# transformers must be imported before torch on this Windows env to avoid a
-# native crash. The streaming model module imports torch directly, so users
-# of streaming on Windows generally need to import transformers first.
-from transformers import GPT2Tokenizer, GPT2LMHeadModel  # noqa: F401
-
 import hashlib
 import os
 import shutil
@@ -19,11 +16,6 @@ import tempfile
 from pathlib import Path
 
 import pytest
-import torch
-
-import bigsmall
-from bigsmall.streaming import StreamingLoader, layer_index
-from bigsmall.streaming_model import StreamingGPT2
 
 
 HF_CACHE = Path(os.environ.get("HF_HOME") or
@@ -41,38 +33,70 @@ def _gpt2_cached() -> Path | None:
     return None
 
 
+N_LAYERS = 4
+HIDDEN = 256
+
+
+def _make_synthetic_transformer(tmp_dir: Path):
+    """Write a synthetic transformer-shaped safetensors file into tmp_dir."""
+    import torch
+    from safetensors.torch import save_file
+
+    torch.manual_seed(0)
+    tensors: dict = {
+        "embed.weight": torch.randn(1024, HIDDEN, dtype=torch.bfloat16),
+        "ln_f.weight": torch.randn(HIDDEN, dtype=torch.bfloat16),
+        "ln_f.bias": torch.zeros(HIDDEN, dtype=torch.bfloat16),
+    }
+    for i in range(N_LAYERS):
+        prefix = f"model.layers.{i}"
+        tensors[f"{prefix}.self_attn.q_proj.weight"] = torch.randn(HIDDEN, HIDDEN, dtype=torch.bfloat16)
+        tensors[f"{prefix}.self_attn.k_proj.weight"] = torch.randn(HIDDEN, HIDDEN, dtype=torch.bfloat16)
+        tensors[f"{prefix}.mlp.up_proj.weight"] = torch.randn(HIDDEN * 2, HIDDEN, dtype=torch.bfloat16)
+        tensors[f"{prefix}.mlp.down_proj.weight"] = torch.randn(HIDDEN, HIDDEN * 2, dtype=torch.bfloat16)
+        tensors[f"{prefix}.input_layernorm.weight"] = torch.randn(HIDDEN, dtype=torch.bfloat16)
+    save_file(tensors, str(tmp_dir / "model.safetensors"))
+    return tensors
+
+
 @pytest.fixture(scope="module")
-def gpt2_bs_dir():
-    """Compress GPT-2 once for all streaming tests."""
-    if _gpt2_cached() is None:
-        pytest.skip("GPT-2 not in HF cache")
-    out = Path(tempfile.mkdtemp(prefix="bigsmall_streaming_test_"))
+def synthetic_bs_dir():
     try:
-        bigsmall.compress_for_hub("gpt2", output_dir=out, overwrite=True)
-        yield out
+        import torch  # noqa: F401
+        import safetensors  # noqa: F401
+    except ImportError:
+        pytest.skip("torch/safetensors not installed")
+    import bigsmall
+
+    work = Path(tempfile.mkdtemp(prefix="bigsmall_streaming_test_"))
+    src_dir = work / "src"
+    src_dir.mkdir()
+    out_dir = work / "out"
+    src_tensors = _make_synthetic_transformer(src_dir)
+    try:
+        bigsmall.compress_for_hub(str(src_dir), output_dir=out_dir, overwrite=True)
+        yield {"out": out_dir, "tensors": src_tensors}
     finally:
-        shutil.rmtree(out, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
 
 
-def test_streaming_layer_count(gpt2_bs_dir):
-    """GPT-2 has 12 transformer layers and 4 non-layer tensors."""
-    with StreamingLoader(str(gpt2_bs_dir), device="cpu") as L:
-        assert L.layer_count() == 12
+def test_streaming_layer_count(synthetic_bs_dir):
+    from bigsmall.streaming import StreamingLoader
+
+    with StreamingLoader(str(synthetic_bs_dir["out"]), device="cpu") as L:
+        assert L.layer_count() == N_LAYERS
         non_layer = L.non_layer_tensor_names()
-        # GPT-2 safetensors: wte, wpe, ln_f.weight, ln_f.bias (lm_head is tied)
-        assert sorted(non_layer) == ["ln_f.bias", "ln_f.weight",
-                                     "wpe.weight", "wte.weight"]
-        # 12 layers x 13 tensors each + 4 non-layer = 160
-        total = sum(len(L.layer_tensor_names(i)) for i in range(12)) + len(non_layer)
-        assert total == 160
+        assert sorted(non_layer) == ["embed.weight", "ln_f.bias", "ln_f.weight"]
+        total = sum(len(L.layer_tensor_names(i)) for i in range(N_LAYERS)) + len(non_layer)
+        assert total == len(synthetic_bs_dir["tensors"])
 
 
-def test_streaming_md5_roundtrip_all_layers(gpt2_bs_dir):
-    """Iterate every layer + non-layer through the streaming loader; every
-    decompressed tensor must md5-match the source safetensors bytes."""
-    from safetensors.torch import load_file
-    src = _gpt2_cached()
-    orig = load_file(str(src))
+def test_streaming_md5_roundtrip_all_layers(synthetic_bs_dir):
+    """Every decompressed tensor must md5-match its source."""
+    import torch
+    from bigsmall.streaming import StreamingLoader, layer_index
+
+    orig = synthetic_bs_dir["tensors"]
     name_to_md5 = {
         k: hashlib.md5(v.contiguous().view(torch.uint8).cpu().numpy().tobytes()).hexdigest()
         for k, v in orig.items()
@@ -80,7 +104,7 @@ def test_streaming_md5_roundtrip_all_layers(gpt2_bs_dir):
 
     bad: list[tuple[str, str]] = []
     seen: set[str] = set()
-    with StreamingLoader(str(gpt2_bs_dir), device="cpu") as L:
+    with StreamingLoader(str(synthetic_bs_dir["out"]), device="cpu") as L:
         for name, t in L.load_non_layer_tensors().items():
             seen.add(name)
             md5 = hashlib.md5(t.contiguous().view(torch.uint8).cpu().numpy().tobytes()).hexdigest()
@@ -89,7 +113,6 @@ def test_streaming_md5_roundtrip_all_layers(gpt2_bs_dir):
         for layer_idx, layer in L.iter_layers():
             for name, t in layer.items():
                 seen.add(name)
-                # Verify the layer index matches the regex
                 assert layer_index(name) == layer_idx
                 md5 = hashlib.md5(t.contiguous().view(torch.uint8).cpu().numpy().tobytes()).hexdigest()
                 if md5 != name_to_md5[name]:
@@ -102,23 +125,41 @@ def test_streaming_md5_roundtrip_all_layers(gpt2_bs_dir):
     assert not extra, f"extra tensors: {sorted(extra)[:3]}"
 
 
-def test_streaming_inference_identical_to_full(gpt2_bs_dir):
-    """StreamingGPT2 greedy generation produces the exact same token ids as
-    a full-load GPT2LMHeadModel."""
-    tok = GPT2Tokenizer.from_pretrained("gpt2")
-    prompt = "The future of artificial intelligence is"
-    inp = tok(prompt, return_tensors="pt").input_ids
+def test_streaming_inference_identical_to_full():
+    """StreamingGPT2 greedy generation == GPT2LMHeadModel.
 
-    with StreamingLoader(str(gpt2_bs_dir), device="cpu") as L:
-        sm = StreamingGPT2(L, device="cpu")
-        # 5 new tokens keeps the test fast; correctness signal is the same.
-        out_streaming = sm.generate_greedy(inp, max_new_tokens=5)
+    Requires a real GPT-2 in the HF cache. Skipped otherwise.
+    """
+    src = _gpt2_cached()
+    if src is None:
+        pytest.skip("GPT-2 not in HF cache")
+    try:
+        from transformers import GPT2Tokenizer, GPT2LMHeadModel  # noqa: F401
+    except ImportError:
+        pytest.skip("transformers not installed")
 
-    orig = GPT2LMHeadModel.from_pretrained("gpt2").eval()
-    out_full = orig.generate(
-        input_ids=inp, max_new_tokens=5, do_sample=False,
-        pad_token_id=tok.eos_token_id,
-    )
-    assert torch.equal(out_streaming.cpu(), out_full.cpu()), (
-        f"streaming={out_streaming.tolist()} full={out_full.tolist()}"
-    )
+    import bigsmall
+    import torch
+    from bigsmall.streaming import StreamingLoader
+    from bigsmall.streaming_model import StreamingGPT2
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "gpt2_bs"
+        bigsmall.compress_for_hub("gpt2", output_dir=out, overwrite=True)
+
+        tok = GPT2Tokenizer.from_pretrained("gpt2")
+        prompt = "The future of artificial intelligence is"
+        inp = tok(prompt, return_tensors="pt").input_ids
+
+        with StreamingLoader(str(out), device="cpu") as L:
+            sm = StreamingGPT2(L, device="cpu")
+            out_streaming = sm.generate_greedy(inp, max_new_tokens=5)
+
+        orig_model = GPT2LMHeadModel.from_pretrained("gpt2").eval()
+        out_full = orig_model.generate(
+            input_ids=inp, max_new_tokens=5, do_sample=False,
+            pad_token_id=tok.eos_token_id,
+        )
+        assert torch.equal(out_streaming.cpu(), out_full.cpu()), (
+            f"streaming={out_streaming.tolist()} full={out_full.tolist()}"
+        )

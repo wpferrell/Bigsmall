@@ -24,7 +24,7 @@ from .encoder import compress, compress_delta
 from .decoder import decompress, decompress_delta, load
 from .verify import verify
 from .container import info
-from .hub import compress_for_hub, upload_to_hub, from_pretrained
+from .hub import compress_for_hub, upload_to_hub, upload_to_hub_lfs, from_pretrained
 from .integrations.huggingface import install_hook, uninstall_hook
 from .integrations.vllm import (
     decompress_to_temp as vllm_decompress,
@@ -42,6 +42,7 @@ __all__ = [
     "decompress_delta",
     "compress_for_hub",
     "upload_to_hub",
+    "upload_to_hub_lfs",
     "from_pretrained",
     "install_hook",
     "uninstall_hook",

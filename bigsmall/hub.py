@@ -11,11 +11,13 @@ transformers model object, see `bigsmall.integrations.huggingface.from_pretraine
 """
 from __future__ import annotations
 
+import base64
 import glob
 import os
 import shutil
+import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from . import container, decoder, encoder, hub_index
 
@@ -165,14 +167,60 @@ def compress_for_hub(source: str | Path,
     return str(out_dir.resolve())
 
 
+_UPLOAD_PATTERNS = (
+    "*.bs", "*.json", "*.txt", "*.model",
+    "tokenizer*", "vocab*", "merges*", "special_tokens_map*",
+    "README.md", "README",
+)
+
+
+def _iter_upload_files(out_dir: Path) -> list[Path]:
+    """Return the local files in `out_dir` that match the upload allowlist."""
+    import fnmatch
+    selected: list[Path] = []
+    for p in sorted(out_dir.iterdir()):
+        if not p.is_file():
+            continue
+        if any(fnmatch.fnmatch(p.name, pat) for pat in _UPLOAD_PATTERNS):
+            selected.append(p)
+    return selected
+
+
+def _remote_file_sizes(api, repo_id: str) -> dict[str, int]:
+    """Return {filename: size_bytes} for files already in the HF repo. Empty if missing."""
+    try:
+        info = api.repo_info(repo_id=repo_id, repo_type="model", files_metadata=True)
+    except Exception:
+        return {}
+    out: dict[str, int] = {}
+    for s in getattr(info, "siblings", None) or []:
+        name = getattr(s, "rfilename", None)
+        size = getattr(s, "size", None)
+        if name is not None and size is not None:
+            out[name] = int(size)
+    return out
+
+
+def _cleanup_dirs(*dirs: Path | str | None) -> None:
+    for d in dirs:
+        if d is None:
+            continue
+        p = Path(d)
+        if p.exists() and p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+
+
 def upload_to_hub(output_dir: str | Path,
                   repo_id: str,
                   private: bool = False,
                   commit_message: str = "Upload BigSmall compressed model",
-                  token: Optional[str] = None) -> str:
+                  token: Optional[str] = None,
+                  cleanup: bool = False,
+                  source_dir: Optional[str | Path] = None) -> str:
     """Upload a compress_for_hub() output directory to HuggingFace Hub.
 
-    Creates the repo if it doesn't exist.
+    Creates the repo if it doesn't exist. Resumable: files already on the Hub
+    with matching size are skipped.
 
     Args:
         output_dir: directory containing .bs shards + bigsmall.index.json.
@@ -180,6 +228,8 @@ def upload_to_hub(output_dir: str | Path,
         private: create as private if the repo doesn't exist.
         commit_message: commit message for the upload.
         token: HF auth token; falls back to env HF_TOKEN / cached login.
+        cleanup: if True, delete `output_dir` (and `source_dir` if provided) on success.
+        source_dir: optional source model dir to also remove on cleanup.
 
     Returns:
         The repo URL.
@@ -200,13 +250,140 @@ def upload_to_hub(output_dir: str | Path,
     create_repo(repo_id, repo_type="model", private=private, token=token, exist_ok=True)
 
     api = HfApi(token=token)
-    api.upload_folder(
-        folder_path=str(out_dir),
-        repo_id=repo_id,
-        repo_type="model",
-        commit_message=commit_message,
-        allow_patterns=["*.bs", "*.json", "*.txt", "*.model", "tokenizer*", "vocab*", "merges*"],
-    )
+    remote_sizes = _remote_file_sizes(api, repo_id)
+
+    local_files = _iter_upload_files(out_dir)
+    to_upload: list[Path] = []
+    for f in local_files:
+        local_size = f.stat().st_size
+        remote = remote_sizes.get(f.name)
+        if remote is not None and remote == local_size:
+            print(f"[bigsmall] already uploaded: {f.name}", flush=True)
+            continue
+        to_upload.append(f)
+
+    for f in to_upload:
+        print(f"[bigsmall] uploading {f.name} ({f.stat().st_size:,} bytes)", flush=True)
+        api.upload_file(
+            path_or_fileobj=str(f),
+            path_in_repo=f.name,
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=f"{commit_message}: {f.name}",
+        )
+
+    if cleanup:
+        _cleanup_dirs(out_dir, source_dir)
+
+    return f"https://huggingface.co/{repo_id}"
+
+
+def upload_to_hub_lfs(local_dir: str | Path,
+                      repo_id: str,
+                      token: Optional[str] = None,
+                      commit_message: str = "Upload BigSmall compressed model (LFS)",
+                      private: bool = False,
+                      cleanup: bool = False,
+                      source_dir: Optional[str | Path] = None) -> str:
+    """Push a BigSmall output directory using git LFS rather than the Python API.
+
+    Workaround for the HF Python upload API's tendency to drop the connection
+    during the LFS finalization phase on files larger than ~2 GB. Uses
+    `git clone` + `git lfs track *.bs` + `git push` instead.
+
+    Requires `git` and `git-lfs` in PATH, plus an HF write token.
+
+    Args:
+        local_dir: directory containing .bs shards + bigsmall.index.json.
+        repo_id: target HF repo ID, e.g. "wpferrell/mistral-7b-bigsmall".
+        token: HF write token. Falls back to env HF_TOKEN.
+        commit_message: commit message for the push.
+        private: create the repo as private if it doesn't exist yet.
+        cleanup: if True, delete `local_dir` (and `source_dir` if given) on success.
+        source_dir: optional source model dir to also remove on cleanup.
+
+    Returns:
+        The repo URL.
+    """
+    try:
+        from huggingface_hub import create_repo
+    except ImportError as e:
+        raise ImportError(
+            "upload_to_hub_lfs requires `huggingface_hub` (pip install huggingface_hub)."
+        ) from e
+
+    local_dir = Path(local_dir)
+    if not (local_dir / hub_index.INDEX_FILENAME).exists():
+        raise FileNotFoundError(
+            f"No bigsmall.index.json in {local_dir}. Run compress_for_hub first."
+        )
+
+    tok = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if not tok:
+        token_file = Path.home() / ".huggingface" / "token"
+        if token_file.exists():
+            tok = token_file.read_text(encoding="utf-8").strip() or None
+    if not tok:
+        raise RuntimeError(
+            "upload_to_hub_lfs needs an HF write token via `token=`, env HF_TOKEN, "
+            "or ~/.huggingface/token."
+        )
+
+    # Make sure the repo exists.
+    create_repo(repo_id, repo_type="model", private=private, token=tok, exist_ok=True)
+
+    # Clone via tokenized URL into a sibling staging directory.
+    import tempfile
+    workdir = Path(tempfile.mkdtemp(prefix="bigsmall_lfs_"))
+    clone_url = f"https://user:{tok}@huggingface.co/{repo_id}"
+    auth_header = "Authorization: Basic " + base64.b64encode(
+        f"user:{tok}".encode("utf-8")
+    ).decode("ascii")
+
+    def run(cmd: list[str], cwd: Optional[Path] = None,
+            extra_env: Optional[dict[str, str]] = None) -> None:
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
+        print(f"[bigsmall lfs] $ {' '.join(cmd)}", flush=True)
+        subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=True)
+
+    try:
+        run(["git", "clone", clone_url, str(workdir)])
+        run(["git", "lfs", "install"], cwd=workdir)
+        run(["git", "lfs", "track", "*.bs"], cwd=workdir)
+
+        # Copy our compressed payload into the clone (overwriting).
+        for f in _iter_upload_files(local_dir):
+            shutil.copy2(f, workdir / f.name)
+        # Ensure .gitattributes (created by `lfs track`) is committed.
+        gitattr = workdir / ".gitattributes"
+        if gitattr.exists():
+            run(["git", "add", ".gitattributes"], cwd=workdir)
+
+        run(["git", "add", "--all"], cwd=workdir)
+
+        # Skip the commit if nothing changed.
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=str(workdir),
+            capture_output=True, text=True, check=True,
+        )
+        if status.stdout.strip():
+            run(["git", "commit", "-m", commit_message], cwd=workdir)
+            run([
+                "git",
+                "-c", f"http.extraHeader={auth_header}",
+                "push", "origin", "HEAD",
+            ], cwd=workdir)
+        else:
+            print("[bigsmall lfs] working tree clean - nothing to push", flush=True)
+    finally:
+        # Best-effort cleanup of the staging clone.
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    if cleanup:
+        _cleanup_dirs(local_dir, source_dir)
+
     return f"https://huggingface.co/{repo_id}"
 
 

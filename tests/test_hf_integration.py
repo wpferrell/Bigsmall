@@ -1,53 +1,62 @@
-"""HuggingFace Hub integration tests (Phase 4).
+"""HuggingFace Hub round-trip tests on a synthetic model directory.
 
-Two tests:
- 1. test_compress_for_hub_writes_valid_index   - compress_for_hub('gpt2')
-    produces a populated bigsmall.index.json with byte-correct totals.
- 2. test_from_pretrained_roundtrip_gpt2        - from_pretrained() returns a
-    state_dict whose tensors are byte-identical to the source safetensors.
+We build a tiny safetensors file in a temp dir, run `compress_for_hub` on it,
+check the resulting index, and verify that `from_pretrained` returns a
+state_dict that is byte-identical to the source.
 """
-import hashlib
 import json
-import os
-import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
 
 
-HF_CACHE = Path(os.environ.get("HF_HOME") or
-                os.path.expandvars(r"%USERPROFILE%\.cache\huggingface")) / "hub"
+def _make_synthetic_hf_dir(tmp_dir: Path, dtype) -> Path:
+    """Write a synthetic safetensors file + minimal config.json into tmp_dir."""
+    import torch
+    from safetensors.torch import save_file
 
-
-def _gpt2_cached() -> Path | None:
-    """Find a cached gpt2 model.safetensors in HF_HOME."""
-    p = HF_CACHE / "models--gpt2" / "snapshots"
-    if not p.exists():
-        return None
-    for snap in p.iterdir():
-        st = snap / "model.safetensors"
-        if st.exists():
-            return st
-    return None
+    torch.manual_seed(0)
+    tensors = {
+        "embed.weight": torch.randn(2048, 256, dtype=dtype),
+        "layer.0.attn.weight": torch.randn(512, 512, dtype=dtype),
+        "layer.0.mlp.weight": torch.randn(1024, 512, dtype=dtype),
+        "ln_f.weight": torch.randn(512, dtype=dtype),
+    }
+    save_file(tensors, str(tmp_dir / "model.safetensors"))
+    (tmp_dir / "config.json").write_text(
+        json.dumps({"model_type": "synthetic", "hidden_size": 512}),
+        encoding="utf-8",
+    )
+    return tmp_dir
 
 
 @pytest.fixture(scope="module")
-def gpt2_bs_dir():
-    """Compress cached GPT-2 once for both tests, clean up at end."""
-    if _gpt2_cached() is None:
-        pytest.skip("GPT-2 not in HF cache")
-    import bigsmall
-    out = Path(tempfile.mkdtemp(prefix="bigsmall_hf_test_"))
+def synthetic_bs_dir():
+    """Compress a synthetic 1-shard model once for both tests."""
     try:
-        bigsmall.compress_for_hub("gpt2", output_dir=out, overwrite=True)
-        yield out
+        import torch  # noqa: F401
+        import safetensors  # noqa: F401
+    except ImportError:
+        pytest.skip("torch/safetensors not installed")
+    import bigsmall
+    import torch
+
+    work = Path(tempfile.mkdtemp(prefix="bigsmall_hf_test_"))
+    src_dir = work / "src"
+    src_dir.mkdir()
+    out_dir = work / "out"
+    _make_synthetic_hf_dir(src_dir, torch.bfloat16)
+    try:
+        bigsmall.compress_for_hub(str(src_dir), output_dir=out_dir, overwrite=True)
+        yield {"src": src_dir, "out": out_dir}
     finally:
-        shutil.rmtree(out, ignore_errors=True)
+        import shutil
+        shutil.rmtree(work, ignore_errors=True)
 
 
-def test_compress_for_hub_writes_valid_index(gpt2_bs_dir):
-    out = gpt2_bs_dir
+def test_compress_for_hub_writes_valid_index(synthetic_bs_dir):
+    out = synthetic_bs_dir["out"]
     idx_path = out / "bigsmall.index.json"
     assert idx_path.exists(), "bigsmall.index.json was not written"
 
@@ -63,7 +72,6 @@ def test_compress_for_hub_writes_valid_index(gpt2_bs_dir):
     assert meta["mode"] in ("storage", "balanced", "inference", "mixed")
     assert isinstance(meta["shards"], list) and len(meta["shards"]) == meta["shard_count"]
 
-    # Every listed shard exists on disk and is non-empty.
     total_bytes = 0
     for shard_name in meta["shards"]:
         sp = out / shard_name
@@ -73,26 +81,24 @@ def test_compress_for_hub_writes_valid_index(gpt2_bs_dir):
         f"recorded total_size {meta['total_size']} != on-disk {total_bytes}"
     )
 
-    # weight_map covers all tensors and every value points at a listed shard.
     assert len(idx["weight_map"]) == meta["tensor_count"]
     for name, shard in idx["weight_map"].items():
         assert shard in meta["shards"], f"weight {name} -> unknown shard {shard}"
 
-    # ratio is sensible (10-100%).
     assert 10.0 <= meta["ratio_pct"] <= 100.0
 
 
-def test_from_pretrained_roundtrip_gpt2(gpt2_bs_dir):
-    """state_dict returned by from_pretrained == source safetensors, byte-for-byte."""
+def test_from_pretrained_roundtrip_synthetic(synthetic_bs_dir):
+    """state_dict from from_pretrained == source safetensors, byte-for-byte."""
     import bigsmall
     import torch
     from safetensors.torch import load_file
 
-    src = _gpt2_cached()
-    assert src is not None
+    out_dir = synthetic_bs_dir["out"]
+    src_st = synthetic_bs_dir["src"] / "model.safetensors"
 
-    sd = bigsmall.from_pretrained(str(gpt2_bs_dir), device="cpu", show_progress=False)
-    orig = load_file(str(src))
+    sd = bigsmall.from_pretrained(str(out_dir), device="cpu", show_progress=False)
+    orig = load_file(str(src_st))
 
     assert set(sd.keys()) == set(orig.keys()), (
         f"key sets differ: only-sd={list(set(sd) - set(orig))[:3]} "
@@ -101,7 +107,8 @@ def test_from_pretrained_roundtrip_gpt2(gpt2_bs_dir):
 
     bad = []
     for k in sd:
-        a = sd[k]; b = orig[k]
+        a = sd[k]
+        b = orig[k]
         if a.shape != b.shape or a.dtype != b.dtype:
             bad.append((k, "shape/dtype"))
             continue

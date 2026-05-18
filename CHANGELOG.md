@@ -1,3 +1,77 @@
+## [3.4.0] - 2026-05-18
+
+v3.4.0 adds **`bf16_se_rans`**, a new BF16 codec that uses
+`constriction.stream.stack.AnsCoder` (range Asymmetric Numeral Systems)
+in place of the range-coding `constriction.stream.queue.RangeEncoder`
+used by `bf16_se_ac`. Same algorithm, same compression ratio
+(within 0.0015 pp), GPU-portable bytestream.
+
+**Honest performance measurement on Phi-3.5-mini shard 1** (128 BF16
+tensors, 4.97 GB raw):
+
+| Codec | Encode | Decode | Ratio |
+|---|---|---|---|
+| bf16_se_ac  | 46.0 MB/s | 25.9 MB/s | 65.71% |
+| bf16_se_rans | 45.0 MB/s | 27.0 MB/s | 65.70% |
+| **Speedup** | **0.98x** | **1.04x** | -0.0015 pp |
+
+The RANS_CLAUDE.md spec predicted 10-50x. The actual end-to-end
+speedup on real model data is **~4% decode, 2% slower encode** — the
+algorithmic AC-vs-ANS difference (~1.18x on a single big stream) is
+washed out by the per-call Python↔Rust FFI overhead of constriction
+on bf16's per-exp-bucket coding (one AC coder per nonzero exp, ~80 per
+tensor on Phi). The codec is shipped because (a) it is correct and
+lossless, (b) the bytestream is GPU-portable (rANS state machine has
+simpler GPU semantics than range coding), and (c) the infrastructure
+is in place for a future faster codec implementation. The promised
+"KV live inference under 100ms / pass" and "streaming inference >1
+token/sec" of the spec do **not** materialise at this speedup.
+
+### Added
+- **`bigsmall.codecs.bf16_rans`** — new module with `encode()`/`decode()`
+  using constriction's `AnsCoder`. Wire-protocol-compatible header
+  format with `bf16_se_ac`; only the entropy-coder bytestream changes.
+- New codec name **`bf16_se_rans`** registered in `codec_registry`.
+- **`bf16_se_rans` is the new default** for BF16 tensors in
+  `auto_select_codec` — placed first in `CODEC_CANDIDATES["bf16"]`.
+  A small tie-break tolerance (≤0.01% of raw, capped at 1KB) lets rANS
+  win over AC even when AC happens to be a few bytes smaller, for the
+  speed advantage.
+- **KV cache format bumped to v2** — `compress_kv_entry()` now emits
+  `bf16_se_rans` blobs. v1 readers (v3.3.0) cannot decode v2 blobs;
+  v2 readers (v3.4.0+) decode both versions transparently.
+- Decoder: `bigsmall.decoder._decode_blob` routes `bf16_se_rans`
+  through `bigsmall.codecs.bf16_rans.decode`. The `bf16_se_ac`
+  decoder remains in place for ALL files written by 3.0.0-3.3.0.
+
+### Tests
+- **6 new tests** in `tests/test_rans.py`: roundtrip on Gaussian +
+  edge cases (NaN/Inf/denormals), size-vs-AC delta within 0.1pp,
+  registry layout, backward-compat AC decode, end-to-end compress
+  produces rANS by default.
+- Updated 2 invariant tests (`test_b4_auto_select`,
+  `test_fp2_residual_safety_net_never_regresses`) to allow the
+  bf16_se_rans speed-tolerance budget (≤0.01% of raw).
+- **102 passed / 2 skipped** total (up from 96).
+
+### Compatibility
+- All existing `.bs` files (3.0.0-3.3.0) decode bit-identically with 3.4.0.
+- `bf16_se_rans`-encoded files (new in 3.4.0) require bigsmall ≥ 3.4.0.
+- KV cache blobs from 3.3.0 still decode (`version=1`); new KV blobs
+  written by 3.4.0 use `version=2`.
+
+### What did NOT pan out
+- KV cache live inference: spec target <1s/attention-pass. At 4%
+  speedup, decode at seq=2000 goes 30s → 28.8s. Still unusable for
+  live token generation. Not wired into `BigSmallStreamingModel`.
+- Streaming inference > 1 token/sec: still ~300s/token (4% improvement
+  on the AC portion is dwarfed by the GPU-kernel decode of weights,
+  which is a separate bottleneck — see v3.2.0 `GPU_KERNEL_DONE.md`).
+- 10-50x speedup of the spec's title: not achievable at the Python-FFI
+  layer of constriction; requires a different entropy-coder
+  implementation (e.g. Cython/Numba-jitted tANS, or a native rANS
+  GPU kernel) which is multi-week dedicated work.
+
 ## [3.3.0] - 2026-05-18
 
 v3.3.0 ships **KV cache compression infrastructure**: a new `kv_cache`

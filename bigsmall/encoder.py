@@ -440,6 +440,11 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
     # A5 (bf16_sparsity_v1) was the first; FP2+residual (V4 B1) is the
     # second; bf16_parallel_v1 (GPU-kernel infrastructure, opt-in via
     # gpu_optimised=True) is the third. Add future v2-only codecs to this set.
+    # NOTE: bf16_se_rans is deliberately NOT in this set. Older readers
+    # will see "bf16_se_rans" as an unknown codec name and raise
+    # BigSmallVersionError via the unknown-codec handler — the file format
+    # version bump is unnecessary because the codec_name field already
+    # signals the version requirement.
     v2_codecs = {"bf16_sparsity_v1", "fp2_residual_v1", "bf16_parallel_v1"}
     used_v2 = any(t["codec"] in v2_codecs for t in header_tensors)
     target_version = BS_FORMAT_VERSION_V2 if used_v2 else BS_FORMAT_VERSION_V1

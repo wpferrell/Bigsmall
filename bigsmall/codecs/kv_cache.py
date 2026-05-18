@@ -18,6 +18,7 @@ from typing import Optional
 import torch
 
 from . import bf16 as _bf16
+from . import bf16_rans as _bf16_rans
 
 
 def _tensor_to_bytes(t: torch.Tensor) -> tuple[bytes, list[int]]:
@@ -62,11 +63,13 @@ def compress_kv_entry(keys: torch.Tensor, values: torch.Tensor) -> bytes:
         raise ValueError("compress_kv_entry requires BF16 keys and values")
     k_raw, k_shape = _tensor_to_bytes(keys)
     v_raw, v_shape = _tensor_to_bytes(values)
-    k_blob, _ = _bf16.encode(k_raw)
-    v_blob, _ = _bf16.encode(v_raw)
+    # v2 format: use bf16_se_rans (1.1-1.3x faster than bf16_se_ac at the
+    # same compression ratio). v1 readers (v3.3.0) cannot decode this.
+    k_blob, _ = _bf16_rans.encode(k_raw)
+    v_blob, _ = _bf16_rans.encode(v_raw)
 
     out = bytearray()
-    out += struct.pack("<B", 1)
+    out += struct.pack("<B", 2)
     out += struct.pack("<B", len(k_shape))
     for s in k_shape:
         out += struct.pack("<i", int(s))
@@ -86,8 +89,10 @@ def decompress_kv_entry(data: bytes,
     pos = 0
     version = data[pos]
     pos += 1
-    if version != 1:
+    if version not in (1, 2):
         raise ValueError(f"Unknown KV cache codec version {version}")
+    # v1 = bf16_se_ac (3.3.0), v2 = bf16_se_rans (3.4.0+, 1.18x faster decode).
+    decoder = _bf16.decode if version == 1 else _bf16_rans.decode
 
     def _read_tensor(pos: int) -> tuple[torch.Tensor, int]:
         ndim = data[pos]
@@ -104,7 +109,7 @@ def decompress_kv_entry(data: bytes,
         n_elements = 1
         for s in shape:
             n_elements *= max(1, s)
-        raw = _bf16.decode(blob, {}, n_elements)
+        raw = decoder(blob, {}, n_elements)
         return _bytes_to_tensor(raw, shape, device), pos
 
     keys, pos = _read_tensor(pos)

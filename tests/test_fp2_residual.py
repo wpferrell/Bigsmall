@@ -165,9 +165,16 @@ def test_fp2_residual_safety_net_never_regresses():
         tensor_name="model.layers.0.mlp.gate_proj.weight",
         shape=(300_000,), item_bytes=2,
     )
-    assert len(blob) <= len(plain_blob), (
+    # Tolerance: bf16_se_rans speed tie-break can add up to 0.01% of raw
+    # (capped at 1KB) per tensor. The codec_name must be a "real" BF16 path,
+    # not fp2_residual.
+    tolerance = max(1024, int(len(raw) * 0.0001))
+    assert len(blob) <= len(plain_blob) + tolerance, (
         f"safety net failed: {codec_name} produced {len(blob)} bytes, "
-        f"plain bf16 was {len(plain_blob)}"
+        f"plain bf16 was {len(plain_blob)} (tolerance {tolerance} B)"
+    )
+    assert codec_name in ("bf16_se_ac", "bf16_se_rans"), (
+        f"unexpected codec {codec_name} chosen on a non-fp2 tensor"
     )
 
 

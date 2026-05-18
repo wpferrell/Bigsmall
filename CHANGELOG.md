@@ -1,3 +1,69 @@
+## [3.7.0] - 2026-05-18
+
+v3.7.0 **unlocks parallel tensor encoding on Windows.** The historical
+hard-coded `workers=1` default on Windows was overly conservative —
+diagnostic measurement proved the spawn-context multiprocessing path
+works correctly and produces bit-identical output. Removed the
+platform-specific guard. Added a memory-aware cap so users on
+RAM-constrained machines never over-allocate.
+
+### Measurements on first 20 BF16 tensors of Phi-3.5-mini shard 1 (876 MB raw)
+
+| Workers | Wall time | Speedup |
+|---|---|---|
+| 1 | 115.19 s | 1.00x (baseline) |
+| 2 | 79.33 s | 1.45x |
+| **4** | **63.30 s** | **1.82x** |
+| 8 | 68.79 s | 1.67x (past optimal — pool overhead grows) |
+
+Outputs are **md5-identical** across all worker counts.
+
+The spec's >4x target wasn't reached because: (a) Phi has ~9 BF16 tensors
+per layer × 32 layers — when each worker takes ~10s on a large tensor,
+the 4-way split caps near 4x in theory but practice loses to spawn
+startup and pickling overhead. The measured 1.82x at workers=4 is the
+realistic Windows-spawn ceiling for this workload.
+
+### Added
+- **Default `workers = min(cpu_count, 8)`** on all platforms (was 1 on
+  Windows). Override via `BIGSMALL_WORKERS` env var still works.
+- **`encoder._safe_workers(workers, raw_total_bytes, n_tensors)`** —
+  caps the worker count by:
+    1. `n_tensors` (never spawn more workers than jobs);
+    2. available RAM via `psutil` (each worker needs ~3x the average
+       tensor size of headroom for intermediates).
+  Returns at least 1.
+- **Explicit `mp_context = spawn`** on `ProcessPoolExecutor` for
+  cross-platform consistency (matters less on POSIX where fork is the
+  default, but tightens the Windows path).
+- Same fix applied to the `compress_delta()` worker pool.
+
+### Tests
+- `tests/test_multiprocessing.py` — 5 new tests: workers=2 vs workers=1
+  md5 match, real-model speedup ≥ 1.3x at workers=4 (skipped if Phi
+  fixture missing), default-workers-in-range, memory guard via mocked
+  psutil, `_safe_workers` never returns 0.
+- Updated `test_workers.py::test_default_workers_uses_cpu_count` to
+  reflect the new Windows behaviour.
+- **119 passed / 2 skipped** total (up from 114).
+
+### Compatibility
+- Output is deterministic across worker counts — every existing .bs file
+  is reproducible at any `workers` setting.
+- `BIGSMALL_WORKERS=1` still selects the serial path (no process pool
+  overhead).
+- Default `compress()` on Windows now spawns workers — users who
+  preferred the prior single-threaded behaviour can set
+  `BIGSMALL_WORKERS=1` or pass `workers=1` explicitly.
+
+### What did NOT pan out
+- Spec target >4x speedup at workers=4: actual 1.82x. The remaining gap
+  is process-spawn overhead and constriction's internally single-threaded
+  encode. Pushing further needs either: lighter-weight thread-pool
+  parallelism (constriction releases the GIL during encode — would need
+  measuring), or a Numba-based encoder that's already JIT-warm in each
+  worker.
+
 ## [3.6.0] - 2026-05-18
 
 v3.6.0 ships **`bf16_se_single_kernel`** — the entire BF16 tensor encode

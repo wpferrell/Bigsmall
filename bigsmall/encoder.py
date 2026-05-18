@@ -58,12 +58,13 @@ RAW_TINY_THRESHOLD = 512
 def _default_workers() -> int:
     """Pick a sane default worker count.
 
-    Platform default:
-      Windows  -> 1 (multiprocessing here costs more than it saves and the
-                     spawn-import side-effects regularly break user setups)
-      Linux/macOS -> min(cpu_count, 8) using fork-style multiprocessing
+    All platforms: min(cpu_count, 8). Diminishing returns above 4-8 because
+    constriction AC is internally single-threaded and worker-pool overhead
+    eats further gains. Windows uses spawn context which works correctly —
+    the historical hard-coded workers=1 on Windows was over-conservative
+    (verified in v3.7.0 diagnostics, see research/multiprocessing/).
 
-    Override at any time with the BIGSMALL_WORKERS environment variable.
+    Override with BIGSMALL_WORKERS environment variable.
     """
     env = os.environ.get("BIGSMALL_WORKERS")
     if env is not None:
@@ -71,9 +72,35 @@ def _default_workers() -> int:
             return max(1, int(env))
         except ValueError:
             pass
-    if platform.system() == "Windows":
-        return 1
     return min(os.cpu_count() or 1, 8)
+
+
+def _safe_workers(workers: int, raw_total_bytes: int, n_tensors: int) -> int:
+    """Cap `workers` based on:
+      - available RAM (each worker can hold up to ~3x the largest tensor in
+        process memory during encode);
+      - number of tensors (no point spawning more workers than jobs).
+
+    Returns at least 1.
+    """
+    workers = max(1, int(workers))
+    if n_tensors > 0:
+        workers = min(workers, n_tensors)
+    try:
+        import psutil
+        avail = psutil.virtual_memory().available
+        # Conservative: each worker may hold an average-sized tensor in memory
+        # simultaneously, plus 3x headroom for intermediates.
+        if n_tensors > 0:
+            avg_tensor = raw_total_bytes / n_tensors
+            per_worker = avg_tensor * 3
+            if per_worker > 0:
+                max_by_ram = max(1, int(avail / per_worker))
+                workers = min(workers, max_by_ram)
+    except Exception:
+        # psutil missing or unavailable — fall through with no cap.
+        pass
+    return max(1, workers)
 
 
 def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
@@ -337,6 +364,10 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
 
     if workers is None:
         workers = _default_workers()
+    # Memory-safe cap: never spawn more workers than makes sense for available
+    # RAM or the number of tensors.
+    raw_total = sum(len(t["raw"]) for t in tensors)
+    workers = _safe_workers(workers, raw_total, len(tensors))
 
     # Pre-compute md5 + build the list of encode jobs (parallelizable indices only).
     raw_md5s: list[str] = [hashlib.md5(t["raw"]).hexdigest() for t in tensors]
@@ -401,7 +432,11 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
             encoded[idx] = (blob, codec_name, extras, special_label)
             _account_progress(idx, blob, tensors[idx])
     else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
+        # Explicit spawn context for cross-platform consistency. The worker
+        # target `_encode_worker` is module-level and picklable.
+        import multiprocessing as _mp
+        ctx = _mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
             for fut in as_completed([pool.submit(_encode_worker, j) for j in jobs]):
                 idx, blob, codec_name, extras, special_label = fut.result()
                 encoded[idx] = (blob, codec_name, extras, special_label)
@@ -505,6 +540,8 @@ def compress_delta(finetune_src: str | Path, base_src: str | Path,
 
     if workers is None:
         workers = _default_workers()
+    raw_total = sum(len(t["raw"]) for t in ft_tensors)
+    workers = _safe_workers(workers, raw_total, len(ft_tensors))
 
     raw_md5s: list[str] = [hashlib.md5(t["raw"]).hexdigest() for t in ft_tensors]
 
@@ -554,7 +591,9 @@ def compress_delta(finetune_src: str | Path, base_src: str | Path,
             encoded[idx] = (blob, codec_name, extras, special_label)
             _account(idx, blob)
     else:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
+        import multiprocessing as _mp
+        ctx = _mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
             for fut in as_completed([pool.submit(_delta_worker, j) for j in jobs]):
                 idx, blob, codec_name, extras, special_label = fut.result()
                 encoded[idx] = (blob, codec_name, extras, special_label)

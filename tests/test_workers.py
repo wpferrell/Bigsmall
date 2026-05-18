@@ -57,14 +57,21 @@ def test_roundtrip_with_workers(workers):
                 assert src_md5 == dec_md5, f"{workers} workers: {name} differs"
 
 
-def test_default_workers_platform_aware(monkeypatch):
-    """Default worker count: 1 on Windows, >=1 elsewhere."""
+def test_default_workers_uses_cpu_count():
+    """Default worker count: min(cpu_count, 8), works on all platforms.
+
+    v3.7.0 removed the Windows-only hard-coded workers=1 — diagnostics
+    confirmed Windows spawn context works correctly and parallel encode
+    delivers a 1.8x speedup at workers=4 on real Phi data.
+    """
+    import os
     from bigsmall import encoder
-    monkeypatch.delenv("BIGSMALL_WORKERS", raising=False)
+    os.environ.pop("BIGSMALL_WORKERS", None)
     n = encoder._default_workers()
-    assert n >= 1
-    if platform.system() == "Windows":
-        assert n == 1, f"Windows default should be 1, got {n}"
+    cpu = os.cpu_count() or 1
+    assert n == min(cpu, 8), (
+        f"_default_workers() should be min(cpu_count={cpu}, 8) = {min(cpu,8)}, got {n}"
+    )
 
 
 def test_bigsmall_workers_env_override(monkeypatch):

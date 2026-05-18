@@ -1,3 +1,57 @@
+## [3.3.0] - 2026-05-18
+
+v3.3.0 ships **KV cache compression infrastructure**: a new `kv_cache`
+codec and `CompressedKVCache` manager class. License changed to
+Elastic License 2.0 (see LICENSE + LICENSING.md).
+
+**Codec is correct and lossless. Live-inference integration is NOT
+shipped** — per-attention-pass decode overhead at seq=2000 is ~30 seconds
+(786 MB raw KV → 515 MB compressed, decode at 26 MB/s CPU), which makes
+live token generation impractical at v3.3.0 throughput. The codec is
+shipped as a buildable API for users who want to compress KV state at
+rest (e.g. snapshot/restore long-context sessions), and as the
+infrastructure foundation for a future GPU-accelerated path.
+
+### Added
+- **`bigsmall.codecs.kv_cache`** — `compress_kv_entry(keys, values) -> bytes`
+  and `decompress_kv_entry(bytes, device) -> (keys, values)`. Wraps the
+  existing `bf16_se_ac` codec around per-layer K/V tensors with shape
+  metadata. Returns bit-identical output to input (md5 verified).
+- **`bigsmall.kv_cache_manager.CompressedKVCache`** — drop-in storage
+  class with `set(layer_idx, k, v)`, `get(layer_idx)`, `memory_usage()`,
+  `raw_size()`, `compression_ratio()`, `clear()`. Stores compressed
+  bytes in CPU RAM and materialises tensors on the configured device on
+  `get()`.
+
+### Tests
+- `tests/test_kv_cache.py` (5 tests): lossless round-trip, ratio <75% of
+  raw, full manager API (set/get/usage/ratio), multi-layer correctness,
+  clear() semantics. **96 passed / 2 skipped** total (up from 91).
+
+### Empirical findings on Phi-3.5-mini (32 layers, n_kv_heads=32, head_dim=96)
+- **KV entropy is similar to weight entropy.** K compresses to 67.90%,
+  V to 67.64% of raw BF16 on average across 4 long prompts. Shannon
+  H(K) = 10.62 bits/el, H(V) = 10.58 bits/el. (Weights compress to ~66%.)
+- **Compression ratio is stable across seq lengths:** seq=100 → 66.85%,
+  seq=2000 → 65.50%. The ratio is dominated by per-element entropy,
+  not by amortised header overhead.
+- **Memory savings at full-model seq=2000:** 786.4 MB raw → 515.1 MB
+  compressed, **271.3 MB saved** (1.53x reduction across the whole
+  KV cache).
+- **Performance ceiling for live use:** encode ~46 MB/s, decode ~26 MB/s
+  on CPU constriction. Full-model attention pass decode at seq=2000 is
+  30.4 seconds. Not viable for live token generation in v3.3.0; opt-in
+  GPU AC kernel is the path forward.
+
+### Licensing
+- Repository license changed from Apache 2.0 to **Elastic License 2.0**.
+  See `LICENSE` and `LICENSING.md` for details and commercial terms.
+
+### Compatibility
+- All existing tests still pass. Default behaviour unchanged — KV
+  compression is opt-in via the new API and not wired into
+  `BigSmallStreamingModel` automatically.
+
 ## [3.2.0] - 2026-05-18
 
 v3.2.0 ships GPU-decode infrastructure for BigSmall: a new parallel-stream

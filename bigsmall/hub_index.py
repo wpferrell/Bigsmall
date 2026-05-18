@@ -110,6 +110,7 @@ def build_index(shard_paths: list[str | Path],
     metadata = {
         "bigsmall_version": str(bs_version),
         "container_version": next(iter(container_versions)),
+        "format_version": next(iter(container_versions)),
         "format": fmt,
         "mode": mode,
         "model_type": mtype,

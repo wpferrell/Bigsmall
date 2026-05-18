@@ -2,10 +2,17 @@
 
 Layout:
     [4 bytes]  magic = b"BGSM"
-    [2 bytes]  version (uint16, little-endian, current = 1)
+    [2 bytes]  version (uint16 LE; 1 = legacy, 2 = future-codec-extensions)
     [4 bytes]  header JSON length (uint32 LE)
     [N bytes]  header JSON (utf-8)
     [...]      data section: concatenated compressed blobs
+
+Version policy: a v2 reader MUST accept v1 files transparently (we have 19
+already-uploaded HF models on v1). A v1 reader rejects v2 files explicitly
+rather than misparse the header. New per-tensor codec extensions (planned for
+later sessions: shared probability tables, row-delta, sparsity, QKV dedup)
+are signalled by additive keys inside the per-tensor header dict, never by
+moving bytes around.
 
 Header JSON:
     {
@@ -35,34 +42,68 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from .formats import (
+    BS_FORMAT_VERSION,
+    BS_FORMAT_VERSION_V1,
+    BS_FORMAT_VERSION_V2,
+    BS_SUPPORTED_FORMAT_VERSIONS,
+)
+
 MAGIC = b"BGSM"
-VERSION = 1
+# `VERSION` kept for callers that imported it from older releases. Writes go
+# through `write_container` which now accepts an explicit `format_version`.
+VERSION = BS_FORMAT_VERSION
 
 
-def write_container(path, header: dict, data: bytes) -> None:
-    """Write a complete .bs container to disk."""
+def write_container(path, header: dict, data: bytes,
+                    format_version: int = BS_FORMAT_VERSION) -> None:
+    """Write a complete .bs container to disk.
+
+    Args:
+        path: destination file path.
+        header: header dict (will be json-serialised).
+        data: concatenated tensor data blobs.
+        format_version: container version to stamp into the file. Defaults to
+            `BS_FORMAT_VERSION` (currently v2). Pass `BS_FORMAT_VERSION_V1`
+            explicitly when re-encoding for v1-only consumers.
+    """
+    if format_version not in BS_SUPPORTED_FORMAT_VERSIONS:
+        raise ValueError(
+            f"Unsupported BigSmall format version {format_version!r}; "
+            f"supported: {sorted(BS_SUPPORTED_FORMAT_VERSIONS)}"
+        )
     header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
     with open(path, "wb") as f:
         f.write(MAGIC)
-        f.write(struct.pack("<H", VERSION))
+        f.write(struct.pack("<H", format_version))
         f.write(struct.pack("<I", len(header_bytes)))
         f.write(header_bytes)
         f.write(data)
 
 
 def read_header(path) -> tuple[dict, int]:
-    """Return (header_dict, data_offset)."""
+    """Return (header_dict, data_offset).
+
+    Accepts any supported format version. The returned header dict gains a
+    `_format_version` key when reading from disk so downstream code can
+    distinguish v1 / v2 without re-reading the file.
+    """
     with open(path, "rb") as f:
         magic = f.read(4)
         if magic != MAGIC:
             raise ValueError(f"Not a BigSmall .bs file (magic={magic!r})")
         version, = struct.unpack("<H", f.read(2))
-        if version != VERSION:
-            raise ValueError(f"Unsupported BigSmall version: {version}")
+        if version not in BS_SUPPORTED_FORMAT_VERSIONS:
+            raise ValueError(
+                f"Unsupported BigSmall version: {version}. This build supports "
+                f"{sorted(BS_SUPPORTED_FORMAT_VERSIONS)}. The file may have been "
+                "written by a newer BigSmall release; upgrade with `pip install -U bigsmall`."
+            )
         header_len, = struct.unpack("<I", f.read(4))
         header_bytes = f.read(header_len)
         data_offset = f.tell()
     header = json.loads(header_bytes.decode("utf-8"))
+    header["_format_version"] = version
     return header, data_offset
 
 

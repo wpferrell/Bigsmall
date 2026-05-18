@@ -1,6 +1,21 @@
 """Float format detection and dtype helpers."""
 import numpy as np
 
+# .bs container format version. The container.py reader accepts any value in
+# `BS_SUPPORTED_FORMAT_VERSIONS`; the writer emits `BS_FORMAT_VERSION` by
+# default. v1 is the original layout shipped through 2.2.x. v2 reserves room
+# for future codec features (shared probability tables, row-delta transforms,
+# sparsity masks, QKV block references) without forcing existing v1 files to
+# be re-encoded -- a v2 decoder reads v1 files transparently.
+BS_FORMAT_VERSION_V1 = 1
+BS_FORMAT_VERSION_V2 = 2
+# Default writer version stays at v1 until a release ships an actual v2-only
+# codec feature (shared probability tables, row-delta, sparsity, QKV dedup).
+# That keeps every model produced by 2.3.0 readable by any 2.0.x consumer
+# still pinned in the wild. The reader already accepts both.
+BS_FORMAT_VERSION = BS_FORMAT_VERSION_V1
+BS_SUPPORTED_FORMAT_VERSIONS = frozenset({BS_FORMAT_VERSION_V1, BS_FORMAT_VERSION_V2})
+
 # Mapping of safetensors / torch dtype names to BigSmall format keys
 SAFETENSORS_TO_FORMAT = {
     "F32":  "fp32",

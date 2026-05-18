@@ -1,3 +1,84 @@
+## [3.1.0] - 2026-05-18
+
+v3.1.0 ships the V4 Session B codec infrastructure: two new lossless
+candidate codecs (`fp2_residual_v1`, `cross_layer_delta` group API) are
+implemented, registered, and gated behind the `auto_select_codec` safety
+net. **Neither codec produces a smaller blob than `bf16_se_ac` on real
+transformer attention/MLP tensors** -- the V4 Session A entropy bound was
+based on a *lossy* BF16-rounded FP32-subtraction proxy that cannot be
+realised under a strict-lossless contract. The codecs are kept in the
+registry because: (a) they are correctly lossless and tested as such, and
+(b) they provide the infrastructure hooks needed for the V4 quantize-plus-
+residual / cross-layer work to plug into a future lossy or lossy-fallback
+release without further refactoring.
+
+### Added
+- **FP2 + lossless residual codec** (`bigsmall/codecs/fp2_residual.py`,
+  codec name `fp2_residual_v1`). Quantises each BF16 weight to one of four
+  symmetric levels {-s, -s/3, +s/3, +s} (s = per-tensor absmax), then
+  records a BF16 residual stream plus an XOR correction stream that makes
+  the round-trip exact. The codec is gated by `auto_select_codec` on
+  attention/MLP tensors with at least 65 536 elements; the smallest-wins
+  safety net keeps `bf16_se_ac` when (as measured on Phi-3.5-mini) the
+  per-tensor entropy floor wins.
+- **Cross-layer XOR delta** (`bigsmall/codecs/cross_layer_delta.py`,
+  group API: `encode_group` / `decode_group`; pair API: `encode_pair` /
+  `decode_pair`). Pure-byte XOR transform with a `delta_from` extras key
+  so the decoder can resolve the predecessor at load time. Lossless for
+  every BF16 word including NaN, +/-Inf, denormals.
+- **Container v2 stamping for FP2+residual.** The encoder now promotes
+  the container to format v2 when any tensor selects either
+  `bf16_sparsity_v1` (A5) or `fp2_residual_v1` (V4 B1).
+
+### Tests
+- `tests/test_fp2_residual.py` (6 tests): lossless round-trip on
+  Gaussian and edge-case (NaN/Inf/denormal) tensors, codec is registered,
+  qualification gate correctly skips norms/embeddings/below-threshold
+  tensors, safety net never enlarges the file, container is stamped v2.
+- `tests/test_cross_layer_delta.py` (5 tests): group round-trip, pair
+  round-trip with extras key, edge-case round-trip, length-mismatch
+  raises, plus a regression test that asserts both delta and standalone
+  blobs decode correctly even when the delta is the larger one (the
+  Session B safety-net finding).
+
+### Empirical findings (V4 Session B)
+- **FP2 + residual** on Phi-3.5-mini shard 1 (86 BF16 tensors,
+  4.97 GB raw): forced `fp2_residual_v1` produces blobs averaging
+  **90.249 %** of raw bytes vs **65.707 %** for `bf16_se_ac` — i.e.
+  ~24.5 percentage points LARGER. The codec loses on 86 of 86 tensors.
+  The safety net keeps `bf16_se_ac` everywhere, so the effective ratio
+  matches the v3.0.0 baseline exactly. The Session A lower bound
+  (FP32 subtraction rounded to BF16) is not achievable losslessly
+  because the BF16 rounding loses 1-3 mantissa bits per element that
+  have to be re-stored in a correction stream with the same total
+  entropy.
+- **Cross-layer XOR delta** on Phi-3.5-mini layer groups: bitwise XOR
+  of consecutive layer u16 representations wins by ~1-1.4 % on the
+  tiny layer-norm scale groups (delta beats plain on 13 of 62
+  norm-layer-transitions in the safety-net measurement). On the big
+  mlp/attention tensors (>99.9 % of model bytes), delta loses every
+  time — XOR of two BF16 tensors with random mantissa bits is itself
+  high-entropy. Aggregate file-size impact on a full Phi/Qwen `.bs`
+  model: negligible (<0.0001 %), so the codec is shipped as a module
+  but not yet wired into `encoder.compress`.
+- The combination of these two findings closes the V4 *lossless* search
+  loop opened in Session A. Future V4 work moves to: (a) a lossy-mode
+  toggle that ships the quantize-plus-residual approach with an opt-in
+  accuracy-loss bound, or (b) the snapshot-plus-translator architecture
+  documented in `V4_RESEARCH_CLAUDE.md`.
+
+### Infrastructure
+- `codec_registry.auto_select_codec` gains an `enable_fp2_residual` opt-out
+  flag analogous to the existing `enable_a5` flag. Default is enabled —
+  the safety net guarantees it cannot regress.
+
+### Backwards compatibility
+- Files written by 3.0.0 are read identically by 3.1.0 (no encoder
+  default changes when neither new codec is selected).
+- Files using `fp2_residual_v1` require bigsmall >= 3.1.0 to decode;
+  older builds surface `BigSmallVersionError` via the existing
+  unknown-codec handler in `decoder._decode_blob`.
+
 ## [3.0.0] - 2026-05-18
 
 v3.0.0 closes the V3 per-tensor structural-codec research arc.  The

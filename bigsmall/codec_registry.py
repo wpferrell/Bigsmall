@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from . import tensor_analysis as ta
-from .codecs import bf16, bf16_sparsity, fp32, fp16, fp8, fp4, generic
+from .codecs import bf16, bf16_sparsity, fp2_residual, fp32, fp16, fp8, fp4, generic
 
 
 # Registry of (encode_fn, decode_fn) keyed by codec name.
@@ -63,6 +63,10 @@ def _enc_bf16_sparsity(raw, threshold_word=None, **_):
     return bf16_sparsity.encode(raw, threshold_word=threshold_word)
 
 
+def _enc_fp2_residual(raw, **_):
+    return fp2_residual.encode(raw)
+
+
 def _enc_fp32(raw, **_):
     return fp32.encode(raw)
 
@@ -91,6 +95,10 @@ def _dec_bf16_sparsity(blob, extras, n_weights):
     return bf16_sparsity.decode(blob, extras, n_weights)
 
 
+def _dec_fp2_residual(blob, extras, n_weights):
+    return fp2_residual.decode(blob, extras, n_weights)
+
+
 def _dec_fp32(blob, extras, n_weights):
     return fp32.decode(blob, extras, n_weights)
 
@@ -113,6 +121,7 @@ def _dec_zstd(blob, extras, n_weights):
 
 register_codec("bf16_se_ac", _enc_bf16, _dec_bf16)
 register_codec("bf16_sparsity_v1", _enc_bf16_sparsity, _dec_bf16_sparsity)
+register_codec("fp2_residual_v1", _enc_fp2_residual, _dec_fp2_residual)
 register_codec("fp32_se_ac", _enc_fp32, _dec_fp32)
 register_codec("fp16_se_ac", _enc_fp16, _dec_fp16)
 register_codec("fp8_cat_ac", _enc_fp8, _dec_fp8)
@@ -124,7 +133,7 @@ register_codec("zstd", _enc_zstd, _dec_zstd)
 # the codec that was used by the pre-B4 fixed dispatch for that format, so the
 # "smallest-wins" rule cannot regress the file size.
 CODEC_CANDIDATES: dict[str, list[str]] = {
-    "bf16": ["bf16_se_ac", "bf16_sparsity_v1", "zstd"],
+    "bf16": ["bf16_se_ac", "bf16_sparsity_v1", "fp2_residual_v1", "zstd"],
     "fp32": ["fp32_se_ac", "zstd"],
     "fp16": ["fp16_se_ac", "zstd"],
     "fp8":  ["fp8_cat_ac", "zstd"],
@@ -133,11 +142,30 @@ CODEC_CANDIDATES: dict[str, list[str]] = {
 }
 
 
+def _fp2_residual_qualifies(raw: bytes, fmt: str, tensor_name: str) -> bool:
+    """Gate for the FP2+residual candidate.
+
+    Session A showed the technique only beats plain bf16 on attention and
+    mlp tensors of meaningful size. Norm scales and embeddings either don't
+    have the value clustering that lets FP2 hit useful levels, or they're
+    too small for the 2-bit-index overhead to amortise.
+    """
+    if fmt != "bf16":
+        return False
+    if not fp2_residual.expected_to_beat_bf16(raw):
+        return False
+    # Layer-type gate: parse from tensor name. Attention and mlp weight
+    # tensors carry the matching substring; everything else (norms, embeddings,
+    # biases) skips the candidate so the AC pass cost stays bounded.
+    return ta.classify_layer(tensor_name) in ("attention", "mlp")
+
+
 def auto_select_codec(raw: bytes, fmt: str, dtype: str,
                       tensor_name: str = "",
                       shape: tuple = (),
                       item_bytes: int = 0,
-                      enable_a5: bool = True) -> tuple[bytes, str, dict]:
+                      enable_a5: bool = True,
+                      enable_fp2_residual: bool = True) -> tuple[bytes, str, dict]:
     """Try every candidate codec for `fmt` and return the smallest blob.
 
     Args:
@@ -151,6 +179,7 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
         item_bytes:  same — ignored by built-ins.
         enable_a5:   if False, skip the A5 sparsity candidate entirely (used
                      by the `enable_a5=False` opt-out on `compress()`).
+        enable_fp2_residual: if False, skip the V4 B1 FP2+residual candidate.
 
     Returns:
         (best_blob, best_codec_name, best_extras).  Always returns something —
@@ -175,6 +204,17 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
             except Exception:
                 skip_a5 = True
 
+    # FP2 residual gate (Session B B1). The "smallest wins" rule below
+    # guarantees we never regress; the gate just stops wasting CPU on
+    # tensors that can't benefit.
+    skip_fp2_residual = True
+    if (enable_fp2_residual and fmt == "bf16"
+            and "fp2_residual_v1" in candidates):
+        try:
+            skip_fp2_residual = not _fp2_residual_qualifies(raw, fmt, tensor_name)
+        except Exception:
+            skip_fp2_residual = True
+
     best_size: Optional[int] = None
     best_name: Optional[str] = None
     best_blob: Optional[bytes] = None
@@ -182,6 +222,8 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
 
     for name in candidates:
         if name == "bf16_sparsity_v1" and skip_a5:
+            continue
+        if name == "fp2_residual_v1" and skip_fp2_residual:
             continue
         pair = _REGISTRY.get(name)
         if pair is None:

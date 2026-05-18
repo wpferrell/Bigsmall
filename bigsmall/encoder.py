@@ -135,7 +135,12 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
         shape=tuple(shape) if shape else (), item_bytes=item_bytes,
         enable_a5=enable_a5,
     )
-    special_label = "a5_sparsity" if codec_name == "bf16_sparsity_v1" else None
+    if codec_name == "bf16_sparsity_v1":
+        special_label = "a5_sparsity"
+    elif codec_name == "fp2_residual_v1":
+        special_label = "fp2_residual"
+    else:
+        special_label = None
     return idx, blob, codec_name, extras, special_label
 
 
@@ -419,10 +424,10 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
         "safetensors_metadata": st_meta or None,
         "codec_stats": codec_stats.as_dict(),
     }
-    # Promote container to v2 whenever any tensor used a v2-only codec. So
-    # far the only such codec is A5 (bf16_sparsity_v1); future v2-only codecs
-    # would extend this list.
-    v2_codecs = {"bf16_sparsity_v1"}
+    # Promote container to v2 whenever any tensor used a v2-only codec.
+    # A5 (bf16_sparsity_v1) was the first; FP2+residual (V4 B1) is the
+    # second. Add future v2-only codecs to this set.
+    v2_codecs = {"bf16_sparsity_v1", "fp2_residual_v1"}
     used_v2 = any(t["codec"] in v2_codecs for t in header_tensors)
     target_version = BS_FORMAT_VERSION_V2 if used_v2 else BS_FORMAT_VERSION_V1
     container.write_container(dst, header, data_buf.getvalue(),

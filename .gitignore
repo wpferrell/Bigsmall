@@ -91,3 +91,9 @@ ROADMAP*.md
 V4_RESEARCH*.md
 V3_RELEASE*.md
 
+# Internal task / status files - never publish
+*_TASK.md
+GIT_CHECK*.md
+MARKETING_POSTS.md
+BACKUP_TASK.md
+

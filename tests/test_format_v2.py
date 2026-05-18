@@ -80,8 +80,13 @@ def test_v2_writer_emits_v2_and_reads_back():
 
 
 def test_unsupported_version_rejected_clearly():
-    """A future v3 file must fail with a helpful error, not silent corruption."""
-    from bigsmall import container
+    """A future v3 file must fail with a helpful error, not silent corruption.
+
+    Since 2.4.1 this raises `BigSmallVersionError` with an embedded
+    `pip install --upgrade bigsmall` instruction. `BigSmallVersionError`
+    is a regular `Exception` subclass so older test imports that only
+    knew `ValueError` will be flagged at upgrade time."""
+    from bigsmall import container, BigSmallVersionError
 
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "future.bs"
@@ -91,7 +96,7 @@ def test_unsupported_version_rejected_clearly():
             f.write(struct.pack("<H", 99))           # impossibly future version
             f.write(struct.pack("<I", len(header_bytes)))
             f.write(header_bytes)
-        with pytest.raises(ValueError, match="Unsupported BigSmall version"):
+        with pytest.raises(BigSmallVersionError, match="pip install --upgrade bigsmall"):
             container.read_header(path)
 
 

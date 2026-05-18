@@ -8,7 +8,7 @@ with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
 
 setup(
     name="bigsmall",
-    version="2.2.0",
+    version="3.0.0",
     description="Lossless neural network weight compression - run any model, no compromises",
     long_description=long_description,
     long_description_content_type="text/markdown",

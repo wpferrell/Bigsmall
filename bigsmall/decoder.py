@@ -16,7 +16,11 @@ from typing import Optional
 import numpy as np
 
 from . import container, formats
-from .codecs import bf16, fp32, fp16, fp8, fp4, special as special_codec, generic
+from .codecs import (
+    bf16, bf16_sparsity, fp32, fp16, fp8, fp4,
+    special as special_codec, generic,
+)
+from .exceptions import BigSmallVersionError
 
 
 _FORMAT_CODECS = {
@@ -50,6 +54,8 @@ def _decode_blob(t: dict, blob: bytes) -> bytes:
         return None  # caller must resolve from master tensor
     if codec == "raw":
         return blob  # tensor stored uncompressed (tiny tensor short-circuit)
+    if codec == "bf16_sparsity_v1":
+        return bf16_sparsity.decode(blob, extras, n_weights)
     if codec == "special":
         # n_bytes is total tensor byte length
         # item_bytes from extras
@@ -65,7 +71,15 @@ def _decode_blob(t: dict, blob: bytes) -> bytes:
     if codec == "zstd_xor_delta":
         # Returns the XOR delta bytes - caller XORs with base
         return generic.decode_zstd(blob, extras)
-    raise ValueError(f"Unknown codec: {codec}")
+    # Unknown codec name -- almost always means the file was produced by a
+    # newer bigsmall release that introduced a codec this build doesn't
+    # know how to decode. Surface the actionable upgrade message.
+    from . import __version__ as _bs_version
+    raise BigSmallVersionError(
+        required="newer-than-installed",
+        installed=_bs_version,
+        detail=f"file references unknown codec {codec!r}",
+    )
 
 
 def decompress(src: str | Path, dst: Optional[str | Path] = None,

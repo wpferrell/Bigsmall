@@ -143,6 +143,110 @@ def codec_for_format(fmt: str) -> str:
     }[fmt]
 
 
+# ----------------------------------------------------------------------------
+# A5: sparsity-aware codec qualification scan.
+# ----------------------------------------------------------------------------
+#
+# The bf16 joint-entropy codec is at its lower bound for "well-behaved" weight
+# tensors but pays for the wide H(exp) of high-kurtosis distributions whose
+# outliers populate many exponent values even though most weights are tiny.
+# `compute_sparsity_stats()` runs a cheap O(n) scan (sampled if necessary) and
+# returns the data the encoder needs to decide whether the A5 codec should
+# be tried for a given BF16 tensor.
+#
+# Thresholds chosen from the entropy analysis in
+# `research/compression_analysis_may2026.md`:
+#   - typical matrix kurtosis: 0.2 - 1.2
+#   - Qwen3 early MLP kurtosis: 4.5 - 17  (these benefit from A5)
+#   - typical matrix near-zero%: 0.002 - 0.010
+#   - Qwen3 early MLP near-zero%: 0.03 - 0.23
+
+
+A5_MIN_ELEMENTS = 65_536
+A5_KURTOSIS_THRESHOLD = 2.0   # excess kurtosis
+A5_NEAR_ZERO_THRESHOLD_PCT = 0.05  # fraction of |w| < threshold
+A5_NEAR_ZERO_ABS_THRESHOLD = 1e-6
+A5_STATS_SAMPLE_CAP = 1_000_000  # 1 M elements is enough for kurtosis/skew
+
+
+def compute_sparsity_stats(raw: bytes, dtype: str = "BF16",
+                           sample_cap: int = A5_STATS_SAMPLE_CAP) -> dict:
+    """Cheap scan: kurtosis_excess, near_zero_pct, mean_abs, qualifies_for_a5.
+
+    Only BF16 is supported on the qualification side; other dtypes return
+    `qualifies_for_a5=False` unconditionally. Large tensors are stride-sampled
+    to `sample_cap` elements so the scan is O(min(n, sample_cap)).
+
+    Returns a dict with:
+        n_elements:     int
+        kurtosis_excess: float (NaN if std == 0)
+        near_zero_pct:  float in [0, 100]
+        mean_abs:       float
+        qualifies_for_a5: bool
+    """
+    if dtype not in ("BF16", "bfloat16"):
+        return {
+            "n_elements": 0,
+            "kurtosis_excess": float("nan"),
+            "near_zero_pct": float("nan"),
+            "mean_abs": 0.0,
+            "qualifies_for_a5": False,
+        }
+    u16 = np.frombuffer(raw, dtype=np.uint16)
+    n = int(u16.size)
+    if n < A5_MIN_ELEMENTS:
+        return {
+            "n_elements": n,
+            "kurtosis_excess": float("nan"),
+            "near_zero_pct": float("nan"),
+            "mean_abs": 0.0,
+            "qualifies_for_a5": False,
+        }
+    # Stride-sample for very large tensors. The stats (kurtosis, near-zero %,
+    # mean abs) are all law-of-large-numbers stable at 1M elements.
+    sample = u16
+    if u16.size > sample_cap:
+        step = max(1, u16.size // sample_cap)
+        sample = u16[::step]
+    # BF16 -> FP32 via leftshift into FP32 word
+    u32 = sample.astype(np.uint32) << 16
+    f = u32.view(np.float32)
+    finite = f[np.isfinite(f)]
+    if finite.size == 0:
+        return {
+            "n_elements": n,
+            "kurtosis_excess": float("nan"),
+            "near_zero_pct": 100.0,
+            "mean_abs": 0.0,
+            "qualifies_for_a5": False,
+        }
+    abs_f = np.abs(finite)
+    mu = float(finite.mean())
+    sd = float(finite.std())
+    if sd == 0.0:
+        kurt = float("nan")
+    else:
+        d = finite - mu
+        m2 = float((d * d).mean())
+        m4 = float((d ** 4).mean())
+        kurt = (m4 / (m2 * m2)) - 3.0 if m2 > 0 else float("nan")
+    near_zero_count = int((abs_f < A5_NEAR_ZERO_ABS_THRESHOLD).sum())
+    near_zero_pct = 100.0 * near_zero_count / float(finite.size)
+    mean_abs = float(abs_f.mean())
+
+    qualifies = (
+        (isinstance(kurt, float) and not (kurt != kurt) and kurt >= A5_KURTOSIS_THRESHOLD)
+        or (near_zero_pct >= A5_NEAR_ZERO_THRESHOLD_PCT)
+    )
+    return {
+        "n_elements": n,
+        "kurtosis_excess": kurt,
+        "near_zero_pct": near_zero_pct,
+        "mean_abs": mean_abs,
+        "qualifies_for_a5": bool(qualifies),
+    }
+
+
 # ============================================================================
 # Deep entropy analysis (research / V3 codec planning)
 # ============================================================================

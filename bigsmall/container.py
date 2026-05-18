@@ -42,6 +42,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from .exceptions import BigSmallVersionError
 from .formats import (
     BS_FORMAT_VERSION,
     BS_FORMAT_VERSION_V1,
@@ -94,10 +95,18 @@ def read_header(path) -> tuple[dict, int]:
             raise ValueError(f"Not a BigSmall .bs file (magic={magic!r})")
         version, = struct.unpack("<H", f.read(2))
         if version not in BS_SUPPORTED_FORMAT_VERSIONS:
-            raise ValueError(
-                f"Unsupported BigSmall version: {version}. This build supports "
-                f"{sorted(BS_SUPPORTED_FORMAT_VERSIONS)}. The file may have been "
-                "written by a newer BigSmall release; upgrade with `pip install -U bigsmall`."
+            # Tell the user exactly what to do. We hard-code the next-version
+            # string here because the version that introduced the v2 format
+            # is 2.4.0; any future on-disk format will raise the same error
+            # but with its own required-version annotation in the detail.
+            from . import __version__ as _bs_version
+            raise BigSmallVersionError(
+                required="2.4.0",
+                installed=_bs_version,
+                detail=(
+                    f"file uses container format v{version}; "
+                    f"this build supports {sorted(BS_SUPPORTED_FORMAT_VERSIONS)}"
+                ),
             )
         header_len, = struct.unpack("<I", f.read(4))
         header_bytes = f.read(header_len)
@@ -225,6 +234,14 @@ def info(path) -> dict[str, Any]:
     ]
 
     ratio = (file_size / total_raw * 100) if total_raw > 0 else 0.0
+    # Codec breakdown.  Prefer the header-stamped value (written since v2.5.0)
+    # so old readers and pre-v2.5.0 files still get something useful by
+    # re-tallying the per-tensor `codec` field.
+    codec_stats: dict[str, int] = dict(header.get("codec_stats") or {})
+    if not codec_stats:
+        for pt in per_tensor:
+            cn = pt.get("codec", "?")
+            codec_stats[cn] = codec_stats.get(cn, 0) + 1
     return {
         "path": str(p),
         "file_size": file_size,
@@ -240,6 +257,7 @@ def info(path) -> dict[str, Any]:
         "version": VERSION,
         "format_breakdown": format_breakdown,
         "special_counts": special_counts,
+        "codec_stats": codec_stats,
         "per_tensor": per_tensor,
         "top5_best": best5,
         "top5_worst": worst5,

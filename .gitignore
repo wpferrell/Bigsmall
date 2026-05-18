@@ -25,7 +25,7 @@ wheels/
 # Compressed model files (too large for git)
 *.bs
 *.safetensors
-"ù.parquet
+"ÔøΩ.parquet
 *.jsonl
 
 # Local model directories
@@ -41,12 +41,20 @@ UNIVERSAL_STATE.md
 SESSION_*.md
 *_NOTES.md
 *_INTERNAL.md
+*_CLAUDE.md
+*_DONE.md
+NEXT_CLAUDE.md
+UPLOAD_TASK*.md
+UPLOAD_TASK*.json
+HF_CARDS_STATE.json
 
 # Research scripts - never publish
 experiments/
 research/
 cc*.py
 ck*.py
+upload_runner.py
+patch_hf_cards.py
 
 # Credentials/secrets
 .env
@@ -57,7 +65,7 @@ secrets.yml
 
 # Environments
 venv/
-envˆ/
+envÔøΩ/
 .venv/
 
 # IDE / OS
@@ -80,4 +88,6 @@ run_claude.bat
 V3_ROADMAP.md
 ROADMAP*.md
 *_PRIVATE*
+V4_RESEARCH*.md
+V3_RELEASE*.md
 

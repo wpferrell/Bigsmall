@@ -10,6 +10,12 @@ BigSmall compresses model weights **losslessly**. Mistral 7B goes from 14 GB to 
 pip install bigsmall
 ```
 
+> **Version compatibility:** Models compressed with `bigsmall` 2.4.0+ may
+> use container format v2 for tensors that benefit from newer codecs and
+> require `bigsmall >= 2.4.0` to decompress. v1 files written by every
+> previous release remain readable in 2.x and 3.x. Run
+> `pip install --upgrade bigsmall` to install the latest release.
+
 ```python
 import bigsmall
 
@@ -65,7 +71,7 @@ DFloat11 keeps weights compressed in GPU memory and decompresses per forward pas
 | Delta compression | **Yes -- 6.95% of source size** | No |
 | vLLM compatible? | **Yes** | Custom inference engine only |
 | Peak RAM (streaming) | **< 2 GB for any model size** | Full model in VRAM |
-| Pre-compressed models on HF | **13+ and growing** | ~30 (low downloads) |
+| Pre-compressed models on HF | **21 and growing** | ~30 (low downloads) |
 
 ### BigSmall vs ZipNN (the other storage-compression option)
 
@@ -77,7 +83,7 @@ Both decompress at load time. BigSmall compresses significantly better and suppo
 | Compression ratio (FP32) | **75-83%** | ~83% |
 | FP32 / FP16 / FP8 / FP4 | **All supported** | Mainly BF16 |
 | Streaming loader | **Yes -- peak RAM < 2 GB** | No |
-| Pre-compressed models on HF | **13+ and growing** | 5 total |
+| Pre-compressed models on HF | **21 and growing** | 5 total |
 | Hardware | **Any** | Any |
 
 ---
@@ -141,7 +147,7 @@ state_dict = bigsmall.from_pretrained("you/mistral-7b-bigsmall")
 
 Ready to use -- no compression step needed. Just swap the model ID:
 
-`python
+```python
 import bigsmall
 bigsmall.install_hook()
 
@@ -154,30 +160,33 @@ tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
 inputs = tokenizer("Hello!", return_tensors="pt")
 outputs = model.generate(**inputs, max_new_tokens=100)
 print(tokenizer.decode(outputs[0]))
-`
+```
 
-| Model | HuggingFace | Original | Compressed | Ratio |
-|-------|-------------|----------|------------|-------|
-| DeepSeek V4 Flash | [wpferrell/deepseek-v4-flash-bigsmall](https://huggingface.co/wpferrell/deepseek-v4-flash-bigsmall) | 148.7 GB | ~97 GB | ~65% |
-| Mistral 7B Instruct v0.3 | [wpferrell/mistral-7b-instruct-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-bigsmall) | 14.2 GB | 9.3 GB | 65.6% |
-| Mistral 7B Instruct v0.2 | [wpferrell/mistral-7b-instruct-v0.2-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-v0.2-bigsmall) | 14.5 GB | 9.5 GB | 65.5% |
-| Llama 3.1 8B Instruct | [wpferrell/llama-3.1-8b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.1-8b-instruct-bigsmall) | 15.0 GB | 9.75 GB | 65.0% |
-| Llama 3 8B Instruct | [wpferrell/llama-3-8b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3-8b-instruct-bigsmall) | 15.0 GB | 9.8 GB | 65.3% |
-| Llama 3.2 3B Instruct | [wpferrell/llama-3.2-3b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.2-3b-instruct-bigsmall) | 6.0 GB | 3.9 GB | 65.0% |
-| Llama 3.2 1B Instruct | [wpferrell/llama-3.2-1b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.2-1b-instruct-bigsmall) | 2.5 GB | 1.6 GB | 64.0% |
-| Gemma 2 9B Instruct | [wpferrell/gemma-2-9b-it-bigsmall](https://huggingface.co/wpferrell/gemma-2-9b-it-bigsmall) | 17.2 GB | ~11.2 GB | ~65% |
-| Gemma 2 2B Instruct | [wpferrell/gemma-2-2b-it-bigsmall](https://huggingface.co/wpferrell/gemma-2-2b-it-bigsmall) | 4.87 GB | ~3.2 GB | ~65% |
-| Gemma 2 2B | [wpferrell/gemma-2-2b-bigsmall](https://huggingface.co/wpferrell/gemma-2-2b-bigsmall) | 9.74 GB | ~6.3 GB | ~65% |
-| Gemma 3 1B Instruct | [wpferrell/gemma-3-1b-it-bigsmall](https://huggingface.co/wpferrell/gemma-3-1b-it-bigsmall) | 1.86 GB | ~1.2 GB | ~65% |
-| Gemma 3 270M | [wpferrell/gemma-3-270m-bigsmall](https://huggingface.co/wpferrell/gemma-3-270m-bigsmall) | 0.5 GB | ~0.33 GB | ~65% |
-| Gemma 3 270M Instruct | [wpferrell/gemma-3-270m-it-bigsmall](https://huggingface.co/wpferrell/gemma-3-270m-it-bigsmall) | 0.5 GB | ~0.33 GB | ~65% |
-| Qwen 2.5 14B Instruct | [wpferrell/qwen2.5-14b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-14b-instruct-bigsmall) | 29.5 GB | 19.5 GB | 66.1% |
-| Qwen 2.5 7B Instruct | [wpferrell/qwen2.5-7b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-7b-instruct-bigsmall) | 15.2 GB | 10.1 GB | 66.0% |
-| Qwen 2.5 3B Instruct | [wpferrell/qwen2.5-3b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-3b-instruct-bigsmall) | 5.76 GB | 3.81 GB | 66.1% |
-| Qwen 2.5 1.5B Instruct | [wpferrell/qwen2.5-1.5b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-1.5b-instruct-bigsmall) | 2.89 GB | 1.91 GB | 66.1% |
-| Qwen 2.5 0.5B Instruct | [wpferrell/qwen2.5-0.5b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-0.5b-instruct-bigsmall) | 0.97 GB | 0.62 GB | 63.9% |
-| Qwen 3 4B Instruct | [wpferrell/qwen3-4b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen3-4b-instruct-bigsmall) | 8.06 GB | 5.3 GB | 65.7% |
-| GPT-2 117M | [wpferrell/gpt2-bigsmall](https://huggingface.co/wpferrell/gpt2-bigsmall) | 548 MB | 414 MB | 75.5% |
+| Model | HuggingFace | Compressed | Ratio |
+|-------|-------------|------------|-------|
+| Qwen 2.5 14B Instruct | [wpferrell/qwen2.5-14b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-14b-instruct-bigsmall) | 18.19 GB | 66.1% |
+| Gemma 2 9B Instruct | [wpferrell/gemma-2-9b-it-bigsmall](https://huggingface.co/wpferrell/gemma-2-9b-it-bigsmall) | 11.31 GB | ~65% |
+| Qwen 3 8B | [wpferrell/qwen3-8b-bigsmall](https://huggingface.co/wpferrell/qwen3-8b-bigsmall) | 10.08 GB | ~66% |
+| Llama 3 8B Instruct | [wpferrell/llama-3-8b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3-8b-instruct-bigsmall) | 9.83 GB | 65.3% |
+| Llama 3.1 8B Instruct | [wpferrell/llama-3.1-8b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.1-8b-instruct-bigsmall) | 9.74 GB | 65.0% |
+| Qwen 2.5 7B Instruct | [wpferrell/qwen2.5-7b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-7b-instruct-bigsmall) | 9.36 GB | 66.0% |
+| Mistral 7B Instruct v0.3 | [wpferrell/mistral-7b-instruct-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-bigsmall) | 8.87 GB | 65.6% |
+| Mistral 7B Instruct v0.2 | [wpferrell/mistral-7b-instruct-v0.2-bigsmall](https://huggingface.co/wpferrell/mistral-7b-instruct-v0.2-bigsmall) | 8.86 GB | 65.5% |
+| Gemma 2 2B | [wpferrell/gemma-2-2b-bigsmall](https://huggingface.co/wpferrell/gemma-2-2b-bigsmall) | 8.09 GB | ~65% |
+| Qwen 3 4B Instruct | [wpferrell/qwen3-4b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen3-4b-instruct-bigsmall) | 4.95 GB | 65.7% |
+| Phi-3.5 Mini Instruct | [wpferrell/phi-3.5-mini-instruct-bigsmall](https://huggingface.co/wpferrell/phi-3.5-mini-instruct-bigsmall) | 4.67 GB | 65.6% |
+| Llama 3.2 3B Instruct | [wpferrell/llama-3.2-3b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.2-3b-instruct-bigsmall) | 3.93 GB | 65.0% |
+| Qwen 2.5 3B Instruct | [wpferrell/qwen2.5-3b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-3b-instruct-bigsmall) | 3.81 GB | 66.1% |
+| Gemma 2 2B Instruct | [wpferrell/gemma-2-2b-it-bigsmall](https://huggingface.co/wpferrell/gemma-2-2b-it-bigsmall) | 3.20 GB | ~65% |
+| Qwen 2.5 1.5B Instruct | [wpferrell/qwen2.5-1.5b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-1.5b-instruct-bigsmall) | 1.89 GB | 66.1% |
+| Llama 3.2 1B Instruct | [wpferrell/llama-3.2-1b-instruct-bigsmall](https://huggingface.co/wpferrell/llama-3.2-1b-instruct-bigsmall) | 1.51 GB | **60.4%** |
+| Gemma 3 1B Instruct | [wpferrell/gemma-3-1b-it-bigsmall](https://huggingface.co/wpferrell/gemma-3-1b-it-bigsmall) | 1.22 GB | ~65% |
+| Qwen 2.5 0.5B Instruct | [wpferrell/qwen2.5-0.5b-instruct-bigsmall](https://huggingface.co/wpferrell/qwen2.5-0.5b-instruct-bigsmall) | 0.61 GB | 63.9% |
+| GPT-2 117M | [wpferrell/gpt2-bigsmall](https://huggingface.co/wpferrell/gpt2-bigsmall) | 0.39 GB | 75.5% |
+| Gemma 3 270M Instruct | [wpferrell/gemma-3-270m-it-bigsmall](https://huggingface.co/wpferrell/gemma-3-270m-it-bigsmall) | 0.33 GB | ~65% |
+| Gemma 3 270M | [wpferrell/gemma-3-270m-bigsmall](https://huggingface.co/wpferrell/gemma-3-270m-bigsmall) | 0.33 GB | ~65% |
+
+> *BF16 ratio varies by model: **60.4 % on Llama 3.2 1B** to **66.1 % on Qwen 2.5 14B**. v2.4.0+ ships a sparsity-aware codec for high-kurtosis MLP tensors; on every real LLM we measured it sits at the joint-entropy floor, so the headline ratio above is essentially independent of codec version. See [`A5_DONE.md`](A5_DONE.md) for the research notes.*
 ---
 
 ## Streaming loader -- run any model on any hardware
@@ -200,7 +209,7 @@ A 4 GB GPU (GTX 1650, M1 MacBook) can run Mistral 7B losslessly. An 8 GB GPU (RT
 
 BigSmall is the only lossless compression tool with a streaming loader. DFloat11 and ZipNN load the full model into memory before inference.
 
-`python
+```python
 from bigsmall import StreamingLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -212,20 +221,18 @@ tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.3")
 inputs = tokenizer("Hello!", return_tensors="pt").to("cuda")
 outputs = model.generate(**inputs, max_new_tokens=200)
 print(tokenizer.decode(outputs[0]))
-`
+```
 
 **Hardware guide:**
 
-`
-Your GPU VRAM     What you can run (BigSmall streaming, lossless)
-??????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????????
-2 GB              GPT-2, Gemma 270M, small models
-4 GB              Llama 3.2 3B, Mistral 7B, Gemma 2B, Llama 3.1 8B
-8 GB              Qwen 2.5 14B, Gemma 2 9B
-12 GB             Qwen 2.5 32B
-24 GB             Llama 70B, Qwen 72B, DeepSeek V4-Flash
-CPU only          Everything -- slower but lossless full quality
-`
+| Your GPU VRAM | What you can run (BigSmall streaming, lossless) |
+|---|---|
+| 2 GB | GPT-2, Gemma 270M |
+| 4 GB | Llama 3.2 3B, Mistral 7B, Gemma 2B, Llama 3.1 8B |
+| 8 GB | Qwen 2.5 14B, Gemma 2 9B, Phi-3.5 Mini |
+| 12 GB | Qwen 2.5 32B, Gemma 3 12B |
+| 24 GB | Llama 70B, Qwen 72B, Gemma 3 27B, DeepSeek V4-Flash |
+| CPU only | Everything -- slower but lossless full quality |
 
 
 ## vLLM integration
@@ -268,7 +275,29 @@ bigsmall verify model.bs
 # Fine-tune delta
 bigsmall compress finetune.safetensors --base base.safetensors -o delta.bs
 bigsmall decompress delta.bs --base base.safetensors -o reconstructed.safetensors
+
+# Upgrade an older .bs file to current best codecs (lossless, never grows)
+bigsmall migrate model.bs                    # in-place, .bs.bak written by default
+bigsmall migrate model.bs --dry-run          # preview savings, write nothing
+bigsmall migrate model.bs --no-backup        # skip the .bs.bak
 ```
+
+`bigsmall migrate` re-encodes each tensor against the per-tensor
+auto-selection registry (see below).  If a newer codec produces a smaller
+blob it replaces the old one; if not the original is kept byte-for-byte.
+By construction the migrated file is therefore never larger than the
+original, and every tensor's decompressed bytes are unchanged
+(md5-verified).  Useful for picking up new codec wins on models you
+already compressed without re-downloading the originals.
+
+### Codec auto-selection
+
+Starting in v2.5.0, every tensor goes through `auto_select_codec`: the
+encoder tries every codec that is registered for the tensor's dtype and
+keeps the smallest blob.  Ties go to the historical default so file sizes
+cannot regress.  The `.bs` header records a `codec_stats` map of
+`codec_name -> tensor_count` for audit; `bigsmall info <file>` prints it
+as a `codec_breakdown` section.
 
 ---
 

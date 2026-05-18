@@ -18,8 +18,12 @@ import numpy as np
 from safetensors import safe_open
 
 from . import codecs as codec_pkg
-from .codecs import bf16, fp32, fp16, fp8, fp4, special as special_codec, generic
-from . import container, formats, tensor_analysis as ta
+from .codecs import (
+    bf16, bf16_sparsity, fp32, fp16, fp8, fp4,
+    special as special_codec, generic,
+)
+from . import codec_registry, container, formats, tensor_analysis as ta
+from .formats import BS_FORMAT_VERSION_V1, BS_FORMAT_VERSION_V2
 
 
 def _maybe_tqdm(iterable, *, total=None, desc="", disable=False):
@@ -78,20 +82,42 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
     Picklable so it works with ProcessPoolExecutor on Windows (spawn).
 
     Args (job tuple):
-        idx, kind, fmt, raw, item_bytes, shape
+        idx, kind, fmt, raw, item_bytes, shape, dtype, name, enable_a5
+        - dtype: safetensors dtype string ("BF16", "F32", ...); auto-select
+          forwards it to the sparsity-stat scanner.
+        - name: tensor name; forwarded as context for future codec wrappers.
+        - enable_a5: bool. When False, the auto-select dispatcher skips the
+          A5 (bf16_sparsity_v1) candidate entirely.  When True, A5 is added
+          to the BF16 candidate list and the smallest blob wins.
 
     Returns:
         (idx, blob, codec_name, extras, special_label)
     """
-    idx, kind, fmt, raw, item_bytes, shape = job
-    # Special codecs come first
+    if len(job) == 6:
+        # Backwards-compat: older callers (e.g. delta path) pass a 6-tuple.
+        idx, kind, fmt, raw, item_bytes, shape = job
+        dtype = "BF16" if fmt == "bf16" else fmt.upper()
+        name = ""
+        enable_a5 = True
+    elif len(job) == 7:
+        # Pre-B4 7-tuple: trailing element was an a5_hint dict; now ignored
+        # because auto_select handles A5 qualification internally.
+        idx, kind, fmt, raw, item_bytes, shape, _legacy_a5_hint = job
+        dtype = "BF16" if fmt == "bf16" else fmt.upper()
+        name = ""
+        enable_a5 = True
+    else:
+        idx, kind, fmt, raw, item_bytes, shape, dtype, name, enable_a5 = job
+
+    # Special codecs come first -- their pattern detection runs before
+    # auto-select and they always win when they apply.
     if kind == "lowcard":
         try:
             blob, extras = special_codec.encode_lowcard(raw, item_bytes)
             extras = {**extras, "special_kind": "lowcard"}
             return idx, blob, "special", extras, "lowcard"
         except Exception:
-            kind = "generic"  # fall through to generic
+            kind = "generic"  # fall through to auto-select
     if kind == "wpe_delta":
         try:
             blob, extras = special_codec.encode_wpe_delta(raw, item_bytes, shape)
@@ -100,14 +126,17 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
         except Exception:
             kind = "generic"
 
-    # Generic / format codec
-    if fmt == "raw":
-        blob, extras = generic.encode_zstd(raw)
-        return idx, blob, "zstd", extras, None
-    mod = _FORMAT_CODECS[fmt]
-    blob, extras = mod.encode(raw)
-    codec_name = ta.codec_for_format(fmt)
-    return idx, blob, codec_name, extras, None
+    # Generic float / raw path: hand off to the registry.  auto_select tries
+    # every candidate (including A5 for qualifying BF16 tensors) and returns
+    # the smallest blob, so this can only equal or improve on the previous
+    # fixed dispatch.
+    blob, codec_name, extras = codec_registry.auto_select_codec(
+        raw, fmt=fmt, dtype=dtype, tensor_name=name,
+        shape=tuple(shape) if shape else (), item_bytes=item_bytes,
+        enable_a5=enable_a5,
+    )
+    special_label = "a5_sparsity" if codec_name == "bf16_sparsity_v1" else None
+    return idx, blob, codec_name, extras, special_label
 
 
 def _detect_dominant_format(reader_keys, reader_dtypes) -> str:
@@ -245,7 +274,8 @@ def _encode_special(t: dict, kind: str) -> tuple[bytes, str, dict]:
 
 def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
              workers: Optional[int] = None, progress: bool = True,
-             exclude_names: Optional[set[str]] = None) -> str:
+             exclude_names: Optional[set[str]] = None,
+             enable_a5: bool = True) -> str:
     """Compress a safetensors file into a .bs container.
 
     Args:
@@ -300,7 +330,13 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
         if len(t["raw"]) < RAW_TINY_THRESHOLD:
             encoded[i] = (t["raw"], "raw", {"n_bytes": len(t["raw"])}, None)
             continue
-        jobs.append((i, kind, t["fmt"], t["raw"], t["item_bytes"], t["shape"]))
+
+        # auto_select_codec handles A5 qualification itself; pass dtype +
+        # name through so the sparsity scanner can read the dtype string.
+        jobs.append((
+            i, kind, t["fmt"], t["raw"], t["item_bytes"], t["shape"],
+            t["dtype"], t["name"], enable_a5,
+        ))
 
     pbar = None
     if progress:
@@ -355,6 +391,7 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
     data_buf = io.BytesIO()
     header_tensors: list[dict] = []
     offset = 0
+    codec_stats = codec_registry.CodecStats()
     for i, t in enumerate(tensors):
         blob, codec_name, extras, special_label = encoded[i]
         data_buf.write(blob)
@@ -370,6 +407,7 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
             "extra": extras or None,
         })
         offset += len(blob)
+        codec_stats.record(codec_name)
 
     header = {
         "format": dominant_fmt,
@@ -379,8 +417,16 @@ def compress(src: str | Path, dst: str | Path, mode: str = "balanced",
         "tensor_count": len(tensors),
         "tensors": header_tensors,
         "safetensors_metadata": st_meta or None,
+        "codec_stats": codec_stats.as_dict(),
     }
-    container.write_container(dst, header, data_buf.getvalue())
+    # Promote container to v2 whenever any tensor used a v2-only codec. So
+    # far the only such codec is A5 (bf16_sparsity_v1); future v2-only codecs
+    # would extend this list.
+    v2_codecs = {"bf16_sparsity_v1"}
+    used_v2 = any(t["codec"] in v2_codecs for t in header_tensors)
+    target_version = BS_FORMAT_VERSION_V2 if used_v2 else BS_FORMAT_VERSION_V1
+    container.write_container(dst, header, data_buf.getvalue(),
+                              format_version=target_version)
     return str(dst)
 
 

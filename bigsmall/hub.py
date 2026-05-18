@@ -400,14 +400,32 @@ def upload_to_hub_lfs(local_dir: str | Path,
     def run(cmd: list[str], cwd: Optional[Path] = None,
             extra_env: Optional[dict[str, str]] = None) -> None:
         env = os.environ.copy()
+        # When Python is launched from Git Bash on Windows the inherited
+        # PATHEXT is `.CPL` only -- so `git-lfs` (which spawns `git` via the
+        # Windows shell) cannot resolve `git` to `git.exe` and dies with
+        # "Error getting Git version: executable file not found in %PATH%".
+        # Force the standard Windows PATHEXT so child processes can find
+        # `.exe` binaries the normal way.
+        if os.name == "nt" and ".EXE" not in env.get("PATHEXT", "").upper():
+            env["PATHEXT"] = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.WSF;.MSC"
         if extra_env:
             env.update(extra_env)
         print(f"[bigsmall lfs] $ {' '.join(cmd)}", flush=True)
         subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, check=True)
 
     try:
-        run(["git", "clone", clone_url, str(workdir)])
-        run(["git", "lfs", "install"], cwd=workdir)
+        # `--no-checkout` is mandatory on Windows: a plain clone tries to
+        # smudge LFS-tracked files during checkout, but `git-lfs` (the
+        # smudge filter) can't find `git rev-parse` from inside the filter
+        # subprocess. Skipping checkout sidesteps the issue entirely. We
+        # don't *need* the checked-out files because we overwrite every
+        # tracked file from `local_dir` below.
+        run(["git", "clone", "--no-checkout", clone_url, str(workdir)])
+        # Initialise LFS hooks for the working copy and (re-)assert the
+        # `*.bs filter=lfs` rule. `git lfs track` writes/updates
+        # `.gitattributes` so subsequent commits route .bs files through
+        # LFS without needing a working-tree checkout first.
+        run(["git", "lfs", "install", "--local"], cwd=workdir)
         run(["git", "lfs", "track", "*.bs"], cwd=workdir)
 
         # Copy our compressed payload into the clone (overwriting).

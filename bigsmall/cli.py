@@ -90,6 +90,10 @@ def _cmd_info(args):
         print("  format_breakdown")
         for k, v in sorted(i["format_breakdown"].items(), key=lambda x: -x[1]):
             print(f"    {k:8s} {v} tensors")
+    if i.get("codec_stats"):
+        print("  codec_breakdown")
+        for k, v in sorted(i["codec_stats"].items(), key=lambda x: -x[1]):
+            print(f"    {k:20s} {v} tensors")
     if i["special_counts"]:
         print("  special tensors")
         for k, v in sorted(i["special_counts"].items()):
@@ -130,6 +134,27 @@ def _cmd_benchmark(args):
     print(f"  encode:     {te:.1f}s  ({src_size / te / 1024 / 1024:.1f} MiB/s)")
     print(f"  decode:     {td:.1f}s  ({src_size / td / 1024 / 1024:.1f} MiB/s)")
     print(f"  ratio:      {pct:.2f}% ({src_size:,} -> {dst_size:,})")
+
+
+def _cmd_migrate(args):
+    from . import migrate as _migrate
+    result = _migrate.migrate(args.src, dry_run=args.dry_run, backup=args.backup)
+    def _line(k, v):
+        print(f"  {k:22s} {v}", flush=True)
+    if result.get("skipped_reason"):
+        print(f"migrate skipped: {result['skipped_reason']} ({args.src})", flush=True)
+        return
+    print(f"migrate{' (dry-run)' if args.dry_run else ''}: {args.src}", flush=True)
+    _line("tensors_total",    result["tensors_total"])
+    _line("tensors_migrated", result["tensors_migrated"])
+    _line("bytes_before",     f"{result['bytes_before']:,}")
+    _line("bytes_after",      f"{result['bytes_after']:,}")
+    _line("blob_savings_pct", f"{result['savings_pct']:.3f}%")
+    _line("format_version",   result["format_version"])
+    if result["codec_changes"]:
+        print("  codec_changes")
+        for k, v in sorted(result["codec_changes"].items(), key=lambda x: -x[1]):
+            print(f"    {k:32s} {v}")
 
 
 def _cmd_pipeline_run(args):
@@ -394,6 +419,14 @@ def main(argv=None):
     s.add_argument("--json", dest="as_json", action="store_true",
                    help="Emit a machine-readable JSON report instead of a table")
     s.set_defaults(func=_cmd_status)
+
+    m = sub.add_parser("migrate", help="Re-encode a .bs file with current best codecs")
+    m.add_argument("src", help="Path to the .bs file to migrate (mutated in place)")
+    m.add_argument("--dry-run", action="store_true",
+                   help="Compute savings, do not write any files")
+    m.add_argument("--no-backup", dest="backup", action="store_false", default=True,
+                   help="Skip writing <src>.bs.bak before overwriting (default: backup is on)")
+    m.set_defaults(func=_cmd_migrate)
 
     p_pipe = sub.add_parser("pipeline", help="Resumable compress + upload pipeline")
     pp_sub = p_pipe.add_subparsers(dest="pipeline_cmd", required=True)

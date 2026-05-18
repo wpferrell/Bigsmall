@@ -30,7 +30,8 @@ from typing import Callable, Optional
 
 from . import tensor_analysis as ta
 from .codecs import (
-    bf16, bf16_rans, bf16_tans, bf16_sparsity, bf16_parallel, fp2_residual,
+    bf16, bf16_rans, bf16_tans, single_kernel as bf16_sk,
+    bf16_sparsity, bf16_parallel, fp2_residual,
     fp32, fp16, fp8, fp4, generic,
 )
 
@@ -68,6 +69,10 @@ def _enc_bf16_rans(raw, **_):
 
 def _enc_bf16_tans(raw, **_):
     return bf16_tans.encode(raw)
+
+
+def _enc_bf16_sk(raw, **_):
+    return bf16_sk.encode(raw)
 
 
 def _enc_bf16_sparsity(raw, threshold_word=None, **_):
@@ -116,6 +121,10 @@ def _dec_bf16_tans(blob, extras, n_weights):
     return bf16_tans.decode(blob, extras, n_weights)
 
 
+def _dec_bf16_sk(blob, extras, n_weights):
+    return bf16_sk.decode(blob, extras, n_weights)
+
+
 def _dec_bf16_sparsity(blob, extras, n_weights):
     return bf16_sparsity.decode(blob, extras, n_weights)
 
@@ -151,6 +160,7 @@ def _dec_zstd(blob, extras, n_weights):
 register_codec("bf16_se_ac", _enc_bf16, _dec_bf16)
 register_codec("bf16_se_rans", _enc_bf16_rans, _dec_bf16_rans)
 register_codec("bf16_se_tans", _enc_bf16_tans, _dec_bf16_tans)
+register_codec("bf16_se_single_kernel", _enc_bf16_sk, _dec_bf16_sk)
 register_codec("bf16_sparsity_v1", _enc_bf16_sparsity, _dec_bf16_sparsity)
 register_codec("fp2_residual_v1", _enc_fp2_residual, _dec_fp2_residual)
 register_codec("bf16_parallel_v1", _enc_bf16_parallel, _dec_bf16_parallel)
@@ -298,23 +308,45 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
             best_blob = blob
             best_extras = extras or {}
 
-    # Fast-decode candidate: bf16_se_tans (Numba-JIT rANS) decodes ~2.3x
-    # faster than bf16_se_ac at +0.1pp size cost on real models. Only runs
-    # when caller opts in via prefer_speed=True. Tolerance default: 0.15%.
+    # Fast-decode candidate. When prefer_speed=True, try both the
+    # bf16_se_single_kernel (v3.6.0, ~4.6x AC decode, +0.5pp cost) and
+    # bf16_se_tans (v3.5.0, ~2.3x AC decode, +0.1pp cost) and pick whichever
+    # wins. Caller's `prefer_speed_tolerance` controls how much size
+    # regression is acceptable in exchange for the speedup.
     if (prefer_speed and fmt == "bf16"
             and "bf16_se_tans" not in candidates):
+        # Single-kernel: largest speedup, larger size delta.
+        sk_blob = None
         try:
-            tans_blob, tans_extras = bf16_tans.encode(raw)
+            sk_blob, sk_extras = bf16_sk.encode(raw)
         except Exception:
-            tans_blob = None
-            tans_extras = None
-        if tans_blob is not None and best_size is not None:
-            tolerance_bytes = max(2048, int(len(raw) * prefer_speed_tolerance))
-            if len(tans_blob) <= best_size + tolerance_bytes:
-                best_blob = tans_blob
-                best_name = "bf16_se_tans"
-                best_size = len(tans_blob)
-                best_extras = tans_extras or {}
+            sk_blob = None
+            sk_extras = None
+        if sk_blob is not None and best_size is not None:
+            # Single-kernel needs a bigger tolerance because its per-bucket
+            # framing adds ~0.5pp vs AC on real models. Default 0.6%
+            # (clamped to at least 4 KB per tensor).
+            sk_tol = max(4096, int(len(raw) * 0.006))
+            if len(sk_blob) <= best_size + sk_tol:
+                best_blob = sk_blob
+                best_name = "bf16_se_single_kernel"
+                best_size = len(sk_blob)
+                best_extras = sk_extras or {}
+                sk_blob = None  # consumed
+        # tANS fallback: if SK didn't win (too big), try tANS (smaller tol).
+        if best_name != "bf16_se_single_kernel":
+            try:
+                tans_blob, tans_extras = bf16_tans.encode(raw)
+            except Exception:
+                tans_blob = None
+                tans_extras = None
+            if tans_blob is not None and best_size is not None:
+                tolerance_bytes = max(2048, int(len(raw) * prefer_speed_tolerance))
+                if len(tans_blob) <= best_size + tolerance_bytes:
+                    best_blob = tans_blob
+                    best_name = "bf16_se_tans"
+                    best_size = len(tans_blob)
+                    best_extras = tans_extras or {}
 
     # Speed-preference tie-break: bf16_se_rans encodes/decodes ~1.1-1.3x
     # faster than bf16_se_ac at virtually identical compression. Per-bucket

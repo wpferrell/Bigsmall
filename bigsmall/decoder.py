@@ -17,7 +17,8 @@ import numpy as np
 
 from . import container, formats
 from .codecs import (
-    bf16, bf16_rans, bf16_tans, bf16_sparsity, bf16_parallel, fp2_residual,
+    bf16, bf16_rans, bf16_tans, single_kernel as bf16_sk,
+    bf16_sparsity, bf16_parallel, fp2_residual,
     fp32, fp16, fp8, fp4,
     special as special_codec, generic,
 )
@@ -59,6 +60,8 @@ def _decode_blob(t: dict, blob: bytes) -> bytes:
         return bf16_rans.decode(blob, extras, n_weights)
     if codec == "bf16_se_tans":
         return bf16_tans.decode(blob, extras, n_weights)
+    if codec == "bf16_se_single_kernel":
+        return bf16_sk.decode(blob, extras, n_weights)
     if codec == "bf16_sparsity_v1":
         return bf16_sparsity.decode(blob, extras, n_weights)
     if codec == "fp2_residual_v1":

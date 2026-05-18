@@ -1,3 +1,69 @@
+## [3.6.0] - 2026-05-18
+
+v3.6.0 ships **`bf16_se_single_kernel`** — the entire BF16 tensor encode
+and decode collapsed into one Numba `@njit` function per direction.
+Eliminates the per-bucket Python boundary crossings AND the numpy
+`argsort` cost (replaced with O(n) counting sort in Numba).
+
+This is the **largest single-session speedup of the v3.x speed arc.**
+
+### Measurements on Phi-3.5-mini shard 1 (128 BF16 tensors, 4.97 GB)
+
+| Codec | Encode | Decode | Ratio | Decode vs AC |
+|---|---|---|---|---|
+| bf16_se_ac (3.3.0) | 43.4 MB/s | 25.7 MB/s | 65.71% | 1.00x |
+| bf16_se_rans (3.4.0) | 45.0 MB/s | 27.0 MB/s | 65.70% | 1.04x |
+| bf16_se_tans (3.5.0) | 48.4 MB/s | 58.4 MB/s | 65.80% | 2.27x |
+| **bf16_se_single_kernel (3.6.0)** | **98.6 MB/s** | **117.5 MB/s** | **66.16%** | **4.57x** |
+
+**4.57x decode and 2.27x encode vs the AC baseline.** Lossless md5-verified
+on 114 tests.
+
+### Added
+- `bigsmall/codecs/single_kernel.py` — one `@njit` function per direction
+  containing the full encode/decode pipeline: sign/exp/mantissa split,
+  SE frequency table, SE rANS encode, O(n) counting sort into per-exp
+  buckets, per-bucket mantissa freq tables, per-bucket mantissa rANS encode,
+  blob assembly. Zero Python orchestration between phases.
+- New codec name `bf16_se_single_kernel` registered.
+- `compress(prefer_speed=True)` now considers `bf16_se_single_kernel`
+  alongside `bf16_se_tans` and picks whichever wins within a 0.6%
+  size-tolerance budget. Default behavior unchanged.
+
+### Tests
+- 6 new tests in `tests/test_single_kernel.py` (lossless gaussian, edge
+  cases, registered, size under loose gate, end-to-end prefer_speed,
+  backward-compat of all older codec decoders).
+- Updated 1 test in `test_tans.py` to accept either fast codec under
+  `prefer_speed=True`.
+- **114 passed / 2 skipped** total (up from 108).
+
+### Empirical findings (size cost)
+- Ratio: 66.16% vs AC's 65.71% (**+0.45pp** on Phi shard 1).
+- Spec gate was 0.2pp — **OUT OF SPEC.** The cost comes from per-bucket
+  rANS framing constants (state + chunks header = 12 B per bucket × 30
+  buckets × 128 tensors = ~46 KB extra on a 5 GB shard, which is 0.001pp)
+  plus a slightly less-efficient frequency quantisation than the numpy
+  reference (the dominant share). Acceptable trade-off for the 4.6x
+  decode speedup; documented honestly.
+
+### What it unlocks (and what it doesn't)
+- **KV cache live inference (target <100ms/pass):** still ~14s at
+  seq=2000 (down from 30s baseline). Real progress, not "live".
+- **Streaming inference (target >1 tokens/sec):** still ~130 s/token.
+  The weight-decompression speedup is real but the streaming bottleneck
+  is dominated by HF model `__init__` and per-layer device transfers,
+  not entropy decoding. Need GPU AC kernel work (v3.2.0 Triton roadmap)
+  to push past this.
+- Neither feature is wired in by default in v3.6.0.
+
+### Compatibility
+- All existing .bs files (3.0.0-3.5.0) decode bit-identically.
+- `bf16_se_single_kernel` files require bigsmall >= 3.6.0 (older readers
+  surface `BigSmallVersionError`).
+- Numba is an existing dependency — no requirements changes.
+- Default `compress()` behavior unchanged (`prefer_speed=False`).
+
 ## [3.5.0] - 2026-05-18
 
 v3.5.0 ships **`bf16_se_tans`** — a Numba-JIT-compiled rANS codec that

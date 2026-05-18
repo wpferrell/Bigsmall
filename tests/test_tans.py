@@ -56,8 +56,10 @@ def test_tans_registered():
     assert codec_registry.get_codec("bf16_se_tans") is not None
 
 
-def test_compress_prefer_speed_picks_tans():
-    """compress(prefer_speed=True) produces bf16_se_tans + lossless round-trip."""
+def test_compress_prefer_speed_picks_fast_codec():
+    """compress(prefer_speed=True) selects a fast-decode BF16 codec
+    (bf16_se_tans or bf16_se_single_kernel, depending on tensor size and
+    which wins the tolerance). Round-trip is lossless either way."""
     try:
         import torch
         import safetensors  # noqa: F401
@@ -77,7 +79,9 @@ def test_compress_prefer_speed_picks_tans():
         bigsmall.compress(src, bs, prefer_speed=True, workers=1, progress=False)
         header, _ = container.read_header(bs)
         codecs = {t["codec"] for t in header["tensors"]}
-        assert "bf16_se_tans" in codecs, f"expected bf16_se_tans, got {codecs}"
+        assert codecs & {"bf16_se_tans", "bf16_se_single_kernel"}, (
+            f"expected a fast-decode codec under prefer_speed, got {codecs}"
+        )
 
         out = bigsmall.decompress(bs)
         with safe_open(str(src), framework="pt") as f:

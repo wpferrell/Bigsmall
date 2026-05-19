@@ -203,6 +203,19 @@ def compress_for_hub(source: str | Path,
         bs_paths.append(dst)
 
     hub_index.write_index(out_dir, bs_paths, duplicate_map=duplicate_map)
+    # Write a sibling binary index for fast random-access lookup on large
+    # models (v3.12.0). The JSON remains the source of truth; the .bin is
+    # a pure accelerator. Skip for small models where the JSON is already
+    # tiny enough that the .bin adds no value.
+    try:
+        total_tensors = sum(
+            container.read_header(p)[0]["tensor_count"] for p in bs_paths
+        )
+        if total_tensors >= hub_index.BINARY_INDEX_MIN_TENSORS:
+            hub_index.write_binary_index(out_dir, bs_paths)
+    except Exception:
+        # Binary index is best-effort; never fail compress_for_hub over it.
+        pass
 
     if include_configs:
         for name in os.listdir(src_dir):

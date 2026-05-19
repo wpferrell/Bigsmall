@@ -27,12 +27,53 @@ Layout:
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 from typing import Any
 
 from . import container
 
 INDEX_FILENAME = "bigsmall.index.json"
+BINARY_INDEX_FILENAME = "bigsmall.index.bin"
+
+# Threshold below which a binary index is pure overhead vs the JSON.
+# At 100+ tensors the binary form starts saving meaningful parse time
+# (and bytes if the names share long prefixes via the string table).
+BINARY_INDEX_MIN_TENSORS = 100
+
+# Binary-index file layout (little-endian throughout):
+#
+#   [4]   magic = b"BSIX"
+#   [1]   version = 1
+#   [3]   reserved (zero)
+#   [4]   n_shards
+#   [4]   n_tensors
+#   [4]   shard_names_section_size
+#   For each shard, in order:
+#     [2]  shard_name_length
+#     [N]  shard_name (UTF-8)
+#   [4]   string_table_size
+#   [N]   string table (utf-8 bytes, names referenced by offset)
+#   For each tensor record (24 bytes each):
+#     [4]  name_offset (into string table)
+#     [2]  name_length
+#     [2]  shard_index
+#     [4]  reserved (zero)
+#     [4]  blob_offset_lo / [4] blob_offset_hi  — uint64 split as 2x uint32
+#         (no — collapse into one uint64 below for clarity)
+#
+# Concretely the per-tensor record is:
+#     <I H H Q Q B 5x  =  4+2+2+8+8+1+5 = 30 bytes
+#   = (name_offset, name_length, shard_index, blob_offset, compressed_bytes,
+#      codec_index, padding5)
+#
+# `codec_index` is into a separate codec-name string table written before
+# the per-tensor records.
+
+BINARY_INDEX_MAGIC = b"BSIX"
+BINARY_INDEX_VERSION = 1
+_TENSOR_RECORD = struct.Struct("<IHHQQB5x")
+assert _TENSOR_RECORD.size == 30
 
 
 def build_index(shard_paths: list[str | Path],
@@ -159,3 +200,203 @@ def shard_paths_from_index(directory: str | Path, index: dict | None = None) -> 
     if index is None:
         index = read_index(directory)
     return [directory / name for name in index["metadata"]["shards"]]
+
+
+# ----------------------------------------------------------------------------
+# Binary index (v3.12.0)
+#
+# `bigsmall.index.bin` is an optional compact form of `bigsmall.index.json`.
+# Both files are written together; the JSON remains the source of truth for
+# human inspection. Readers that want the speedup (millisecond seek lookup)
+# can use `read_binary_index()`.
+
+
+def _build_tensor_lookup(shard_paths: list[Path]) -> list[dict]:
+    """Walk each shard header and collect per-tensor records for the binary index."""
+    records: list[dict] = []
+    for shard_idx, shard in enumerate(shard_paths):
+        header, _data_offset = container.read_header(shard)
+        for t in header["tensors"]:
+            records.append({
+                "name": t["name"],
+                "shard_index": shard_idx,
+                "blob_offset": int(t.get("offset", 0)),
+                "compressed_bytes": int(t.get("compressed_bytes", 0)),
+                "codec": t.get("codec") or "?",
+            })
+    return records
+
+
+def write_binary_index(directory: str | Path,
+                       shard_paths: list[str | Path]) -> Path:
+    """Write `bigsmall.index.bin` alongside the JSON for fast lookup.
+
+    Returns the written path. Reads each shard's header to build the
+    tensor → (shard_index, blob_offset, compressed_bytes, codec) map.
+    """
+    directory = Path(directory)
+    shard_paths = [Path(p) for p in shard_paths]
+    records = _build_tensor_lookup(shard_paths)
+
+    # Build the name and codec string tables. Deduplicate names so repeated
+    # prefixes share bytes via shared offsets.
+    name_table = bytearray()
+    name_offsets: dict[str, tuple[int, int]] = {}  # name -> (offset, len)
+    for r in records:
+        if r["name"] not in name_offsets:
+            encoded = r["name"].encode("utf-8")
+            name_offsets[r["name"]] = (len(name_table), len(encoded))
+            name_table += encoded
+
+    codec_names: list[str] = []
+    codec_index: dict[str, int] = {}
+    for r in records:
+        if r["codec"] not in codec_index:
+            codec_index[r["codec"]] = len(codec_names)
+            codec_names.append(r["codec"])
+    # Codec name table: [n_codecs (uint8)] [for each: name_length (uint8) || name bytes]
+    if len(codec_names) > 255:
+        raise ValueError(
+            f"binary index: more than 255 distinct codec names "
+            f"({len(codec_names)}); needs format extension"
+        )
+
+    out = Path(directory) / BINARY_INDEX_FILENAME
+    with open(out, "wb") as f:
+        # File header
+        f.write(BINARY_INDEX_MAGIC)
+        f.write(struct.pack("<B", BINARY_INDEX_VERSION))
+        f.write(b"\x00\x00\x00")  # reserved padding
+        f.write(struct.pack("<I", len(shard_paths)))
+        f.write(struct.pack("<I", len(records)))
+
+        # Shard name section
+        shard_names_bytes = bytearray()
+        for shard in shard_paths:
+            name_b = shard.name.encode("utf-8")
+            if len(name_b) > 65535:
+                raise ValueError(
+                    f"shard name too long for binary index: {shard.name!r}"
+                )
+            shard_names_bytes += struct.pack("<H", len(name_b))
+            shard_names_bytes += name_b
+        f.write(struct.pack("<I", len(shard_names_bytes)))
+        f.write(bytes(shard_names_bytes))
+
+        # Codec name section
+        f.write(struct.pack("<B", len(codec_names)))
+        for c in codec_names:
+            cb = c.encode("utf-8")
+            if len(cb) > 255:
+                raise ValueError(f"codec name too long: {c!r}")
+            f.write(struct.pack("<B", len(cb)))
+            f.write(cb)
+
+        # String table (tensor names) — write its size, then the bytes.
+        f.write(struct.pack("<I", len(name_table)))
+        f.write(bytes(name_table))
+
+        # Tensor records
+        for r in records:
+            n_off, n_len = name_offsets[r["name"]]
+            f.write(_TENSOR_RECORD.pack(
+                n_off, n_len, r["shard_index"],
+                r["blob_offset"], r["compressed_bytes"],
+                codec_index[r["codec"]],
+            ))
+    return out
+
+
+def read_binary_index(path: str | Path) -> dict[str, Any]:
+    """Parse a binary index file. Returns the same shape as `read_index()`.
+
+    The returned dict has:
+      - "metadata": {"shards": [...], "tensor_count": int, "shard_count": int}
+      - "weight_map": {tensor_name: shard_filename}
+      - "binary": full per-tensor list with offsets + codec names (extra)
+
+    Raises FileNotFoundError if path doesn't exist, or ValueError if the
+    file isn't a binary index (bad magic or version).
+    """
+    path = Path(path)
+    if path.is_dir():
+        path = path / BINARY_INDEX_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(f"No binary index at {path}")
+    with open(path, "rb") as f:
+        magic = f.read(4)
+        if magic != BINARY_INDEX_MAGIC:
+            raise ValueError(f"Not a BigSmall binary index: magic {magic!r}")
+        version = struct.unpack("<B", f.read(1))[0]
+        f.read(3)  # reserved
+        if version != BINARY_INDEX_VERSION:
+            raise ValueError(
+                f"Unsupported binary index version {version} "
+                f"(expected {BINARY_INDEX_VERSION})"
+            )
+        n_shards = struct.unpack("<I", f.read(4))[0]
+        n_tensors = struct.unpack("<I", f.read(4))[0]
+        shard_names_size = struct.unpack("<I", f.read(4))[0]
+        shard_names_bytes = f.read(shard_names_size)
+        # Parse shard names
+        shard_names: list[str] = []
+        pos = 0
+        for _ in range(n_shards):
+            ln = struct.unpack("<H", shard_names_bytes[pos:pos + 2])[0]
+            pos += 2
+            shard_names.append(shard_names_bytes[pos:pos + ln].decode("utf-8"))
+            pos += ln
+
+        # Codec table
+        n_codecs = struct.unpack("<B", f.read(1))[0]
+        codecs: list[str] = []
+        for _ in range(n_codecs):
+            cln = struct.unpack("<B", f.read(1))[0]
+            codecs.append(f.read(cln).decode("utf-8"))
+
+        # String table (tensor names)
+        name_table_size = struct.unpack("<I", f.read(4))[0]
+        name_table = f.read(name_table_size)
+
+        # Per-tensor records
+        records = []
+        weight_map: dict[str, str] = {}
+        for _ in range(n_tensors):
+            (name_off, name_len, shard_idx,
+             blob_off, cmp_bytes, codec_idx) = _TENSOR_RECORD.unpack(
+                 f.read(_TENSOR_RECORD.size)
+             )
+            name = name_table[name_off:name_off + name_len].decode("utf-8")
+            shard_name = shard_names[shard_idx]
+            records.append({
+                "name": name,
+                "shard_index": shard_idx,
+                "shard": shard_name,
+                "blob_offset": blob_off,
+                "compressed_bytes": cmp_bytes,
+                "codec": codecs[codec_idx],
+            })
+            weight_map[name] = shard_name
+
+    return {
+        "metadata": {
+            "shards": shard_names,
+            "shard_count": n_shards,
+            "tensor_count": n_tensors,
+            "binary_index_version": version,
+        },
+        "weight_map": weight_map,
+        "binary": records,
+    }
+
+
+def maybe_read_binary_index(directory: str | Path) -> dict[str, Any] | None:
+    """Try `read_binary_index(directory)`; return None if no .bin file."""
+    directory = Path(directory)
+    bin_path = directory / BINARY_INDEX_FILENAME
+    if not bin_path.exists():
+        return None
+    try:
+        return read_binary_index(bin_path)
+    except (ValueError, FileNotFoundError):
+        return None

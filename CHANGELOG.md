@@ -1,3 +1,57 @@
+## [3.12.0] - 2026-05-18
+
+v3.12.0 ships **binary index encoding** for fast tensor lookup on large
+models, plus a dedup-regression test that pins the existing v2.2.0
+tied-tensor feature against future refactors.
+
+Two of the three improvements in the spec were already in the codebase
+or not applicable to the current architecture; the one new piece
+(binary index) is documented and tested.
+
+### Measurement: which improvements were actually needed?
+
+| Spec item | Status | Why |
+|---|---|---|
+| Tensor deduplication | **Already shipped (v2.2.0)** | Existing feature: `tied_ref` codec for within-shard, `duplicate_map` for cross-shard. Step 0 confirmed zero models in the local set (Phi-3.5, Qwen3-8B, Gemma-3 4B/12B/27B, Qwen2.5-32B) have tied tensors — modern LLMs don't tie embed/lm_head. The feature is correct and now has a regression test on a synthetic tied model. |
+| Layer-aligned shard splitting | **Not implemented** | BigSmall inherits the safetensors shard layout from the source HF model — it does not decide shard boundaries. Step 0 measured: Gemma-3-27B has 32 of 62 layers spanning shard boundaries, but those boundaries come from the model author's `model.safetensors.index.json`, not from BigSmall. Re-sharding into layer-aligned `.bs` files would be a new "reshard" tool — out of immediate scope. |
+| Binary index encoding | **Shipped** | New `bigsmall.index.bin` written alongside the JSON for models with ≥ 100 tensors. JSON remains the source of truth. |
+
+### Added
+
+- **`bigsmall.hub_index.write_binary_index(directory, shard_paths)`** —
+  writes `bigsmall.index.bin` containing a fixed-width record per
+  tensor (30 bytes) plus a deduplicated name string table and a
+  codec name table.
+
+- **`bigsmall.hub_index.read_binary_index(path)`** — parse the binary
+  index back into the same shape as `read_index()` plus a `binary`
+  field with the full per-tensor record list (offsets, codecs).
+
+- **`bigsmall.hub_index.maybe_read_binary_index(directory)`** —
+  returns the parsed index or `None` if the `.bin` doesn't exist or
+  fails to parse.
+
+- **Auto-write of `.bin`** in `compress_for_hub` when the resulting
+  shard set has ≥ 100 tensors (`BINARY_INDEX_MIN_TENSORS`).
+
+### Tests
+- `tests/test_opt_step9.py` — 6 new tests covering binary index
+  roundtrip, threshold behaviour, missing-file fallback, bad-magic
+  rejection, and a synthetic-tied-model dedup regression check.
+- **142 passed / 0 skipped / 4 deselected** total (up from 136).
+
+### Compatibility
+- Zero changes to existing file formats. Older `.bs` shards work
+  unchanged; the binary index is purely optional.
+- Reader-side: `read_index()` still defaults to JSON. Use
+  `maybe_read_binary_index()` if you want the binary path.
+
+### Deferred — not in v3.12.0
+- **Layer-aligned shard re-splitting.** Real benefit on models like
+  Gemma-3-27B (32 of 62 layers cross a shard boundary today), but
+  out of immediate scope. Documented here so the next iteration knows
+  what to build.
+
 ## [3.11.0] - 2026-05-18
 
 v3.11.0 ships **testing infrastructure** — property-based testing,

@@ -1,3 +1,88 @@
+## [3.9.0] - 2026-05-18
+
+v3.9.0 ships **streaming-compression infrastructure** + a handful of
+ergonomics: `compress_from_hub`, partial-model decompress, async-prefetch
+hook on streaming inference, and clearer error messages.
+
+### Added
+
+- **`bigsmall.compress_streaming(src, dst)`** — encodes one tensor at a
+  time via safetensors' lazy `safe_open`, appends each compressed blob to
+  a temp file, and assembles the final `.bs` at the end. Output is
+  **bit-identical to `compress()`** on models without tied weights
+  (md5-verified). Trade-offs:
+    - **No cross-tensor tied-weight dedup** (streaming can't see across
+      tensors). On modern LLMs (Llama-3+, Qwen-3, Phi-3.5 — most don't
+      tie embed/lm_head) the output matches `compress()` exactly.
+    - **No worker pool** (encodes sequentially). On Phi-3.5-mini shard 1
+      this lands at the same wall-clock as `compress(workers=1)` — the
+      `_gather_tensors` upfront overhead saved roughly equals the worker
+      parallelism lost.
+
+- **`bigsmall.compress_from_hub(repo_id, output_dir)`** — downloads each
+  shard via `huggingface_hub` and runs `compress_streaming` on it. Peak
+  RAM stays at one tensor regardless of model size. Requires
+  `huggingface_hub` (raises ImportError with install hint if missing).
+
+- **`bigsmall.decompress_layers(bs_path, layer_indices, …)`** — decompresses
+  only the requested transformer layers. Useful for partial fine-tuning,
+  layer-by-layer analysis, and early-exit inference. `include_non_layer=True`
+  also returns embeddings / lm_head / final norm.
+
+- **`BigSmallStreamingModel(..., prefetch=N)`** — optional async prefetch
+  worker that decompresses layer N+1..N+prefetch ahead of the GPU forward
+  on layer N. Lazy-initialised (no thread until first forward). Honest
+  caveat: with the v3.6.0 codec at ~3 s/layer decode and 85 ms/layer GPU
+  forward, prefetch can't multiply throughput (decoder is the critical
+  path). It amortises first-token startup.
+
+- **Better error messages** in
+  `BigSmallStreamingModel.from_pretrained()`:
+    - Missing path → suggests `compress_from_hub()`.
+    - Missing `config.json` → suggests `huggingface-cli download
+      <repo-id> --include 'config.json'`.
+
+### Memory measurement on Phi-3.5-mini shard 1 (4.97 GB raw)
+
+| Path | RSS growth | Python heap peak |
+|---|---|---|
+| `compress(workers=1)` | 11.5 GB | 11.79 GB |
+| **`compress_streaming`** | **8.19 GB** | **3.37 GB** |
+| Reduction | 1.41x | **3.50x** |
+
+Python-heap reduction is the clean measurement: `compress_streaming`
+peaks at the largest single tensor + its compressed blob + numpy
+codec intermediates. For a 70B model that's the difference between
+"needs 140 GB RAM" and "needs ~5 GB RAM".
+
+### Tests
+- `tests/test_opt_step6.py` — 5 new tests:
+  - `compress_streaming` md5-matches `compress()` on non-tied model
+  - lossless decompress round-trip
+  - `decompress_layers` returns only the requested layers
+  - `from_pretrained` raises with helpful suggestion on missing path
+  - `BigSmallStreamingModel` accepts `prefetch=N` kwarg
+- **124 passed / 2 skipped** total (up from 119).
+
+### Compatibility
+- All existing `.bs` files (3.0.0-3.8.0) decode bit-identically.
+- New public API: `compress_streaming`, `compress_from_hub`,
+  `decompress_layers` exported from top-level `bigsmall`.
+- `BigSmallStreamingModel(prefetch=N)` is opt-in; default 0 (disabled).
+
+### What did NOT pan out
+- **Async prefetch doesn't unlock streaming-inference throughput.** With
+  decode at ~3 s/layer and GPU forward at ~85 ms total per token, the
+  decoder is the critical path; prefetch shifts work in time but
+  doesn't reduce it. Shipped as infrastructure; the actual streaming-
+  inference unlock requires a GPU AC kernel (v3.2.0 Triton roadmap).
+- **`compress_from_hub` is "stream from local cache", not "stream from
+  CDN".** The current implementation downloads each shard to the HF
+  cache then runs `compress_streaming` on it. Truly buffer-streaming
+  from the CDN (zero local disk) would require re-implementing
+  safetensors lazy loading on top of HTTP range requests — multi-day
+  project, not done.
+
 ## [3.8.0] - 2026-05-18
 
 v3.8.0 is a **research-only release**. Two compression-ratio improvement

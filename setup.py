@@ -15,7 +15,7 @@ setup(
     author="Will Ferrell",
     author_email="wpferrell@gmail.com",
     url="https://github.com/wpferrell/Bigsmall",
-    license="Apache-2.0",
+    license="Elastic-2.0",
     python_requires=">=3.9",
     packages=find_packages(include=["bigsmall", "bigsmall.*"]),
     install_requires=[
@@ -46,7 +46,7 @@ setup(
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: Apache Software License",
+        "License :: Other/Proprietary License",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",

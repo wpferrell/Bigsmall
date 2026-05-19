@@ -551,7 +551,7 @@ tensors, 4.97 GB raw):
 | bf16_se_rans | 45.0 MB/s | 27.0 MB/s | 65.70% |
 | **Speedup** | **0.98x** | **1.04x** | -0.0015 pp |
 
-The RANS_CLAUDE.md spec predicted 10-50x. The actual end-to-end
+The original prediction was 10-50x. The actual end-to-end
 speedup on real model data is **~4% decode, 2% slower encode** — the
 algorithmic AC-vs-ANS difference (~1.18x on a single big stream) is
 washed out by the per-call Python↔Rust FFI overhead of constriction
@@ -602,7 +602,7 @@ token/sec" of the spec do **not** materialise at this speedup.
   live token generation. Not wired into `BigSmallStreamingModel`.
 - Streaming inference > 1 token/sec: still ~300s/token (4% improvement
   on the AC portion is dwarfed by the GPU-kernel decode of weights,
-  which is a separate bottleneck — see v3.2.0 `GPU_KERNEL_DONE.md`).
+  which is a separate bottleneck — see the v3.2.0 GPU kernel notes).
 - 10-50x speedup of the spec's title: not achievable at the Python-FFI
   layer of constriction; requires a different entropy-coder
   implementation (e.g. Cython/Numba-jitted tANS, or a native rANS
@@ -811,8 +811,7 @@ release without further refactoring.
 - The combination of these two findings closes the V4 *lossless* search
   loop opened in Session A. Future V4 work moves to: (a) a lossy-mode
   toggle that ships the quantize-plus-residual approach with an opt-in
-  accuracy-loss bound, or (b) the snapshot-plus-translator architecture
-  documented in `V4_RESEARCH_CLAUDE.md`.
+  accuracy-loss bound, or (b) a snapshot-plus-translator architecture.
 
 ### Infrastructure
 - `codec_registry.auto_select_codec` gains an `enable_fp2_residual` opt-out
@@ -866,10 +865,8 @@ This release is the public V3 cut.  Internally it sits on top of:
 - Cross-shard tied-weight dedup, raw codec for tiny tensors, resumable
   pipeline, Windows-aware multiprocessing (2.2.0).
 
-The full per-tensor structural-codec research arc is documented in the
-companion DONE files (`A2_DONE.md`, `A3_DONE.md`, `A4_DONE.md`,
-`A5_DONE.md`, `B3_DONE.md`, `EMB_REORDER_DONE.md`) and was summarised in
-the 2.5.0 release notes.  No further intra-tensor lossless gains are
+The full per-tensor structural-codec research arc was summarised in the
+2.5.0 release notes.  No further intra-tensor lossless gains are
 available on real LLM weight tensors under the current coding model;
 future work moves to cross-tensor / quantize-plus-residual research.
 
@@ -922,25 +919,21 @@ quantisation.  Documented decisions:
 - **A5 sparsity split** (shipped 2.4.0 as a research artefact;
   `research/a5_benchmark.md`): 0.000 pp impact.  Mask cost exactly
   cancels the per-population `H(e)` reduction (chain-rule identity).
-- **A3 embedding row-XOR delta** (`A3_DONE.md`,
-  `research/a3_entropy_check.md`): Step-0 gate rejected.  XOR of
+- **A3 embedding row-XOR delta**: Step-0 gate rejected.  XOR of
   uncorrelated BF16 distributions approaches uniform; on Phi-3.5-mini
   H(delta) is 0.49 bits/el HIGHER than H(rows).
-- **A2 shared probability tables** (`A2_DONE.md`,
-  `research/a2_entropy_check.md`): Step-0 net -5.4 MB on Phi-3.5-mini.
+- **A2 shared probability tables**: Step-0 net -5.4 MB on Phi-3.5-mini.
   Per-tensor SE tables are already only ~47 KB total; KL penalty from
   pooling same-layer-type SE distributions dwarfs the table savings.
-- **A4 QKV block dedup** (`A4_DONE.md`, `research/a4_qkv_check.md`):
-  max pair cosine 0.17 (Phi-3.5-mini, fused qkv_proj) / 0.002
+- **A4 QKV block dedup**: max pair cosine 0.17 (Phi-3.5-mini, fused
+  qkv_proj) / 0.002
   (Qwen3-8B, GQA K vs V).  Q/K/V are nearly orthogonal in weight space —
   training differentiates them by design.
-- **Embedding row reordering** (`EMB_REORDER_DONE.md`,
-  `research/emb_reorder_check.md`): nearest-neighbour cosine averages
+- **Embedding row reordering**: nearest-neighbour cosine averages
   0.29 on Phi-3.5-mini embed_tokens — far below the ~0.85 needed for
   XOR-delta to win.  L2-sort, PC1-sort, and greedy-NN-chain orderings
   all make the delta entropy ~0.47 bits/el WORSE than the rows.
-- **B3 GPU compression** (`B3_DONE.md`,
-  `research/b3_gpu_benchmark.md`): not recommended.  Bottleneck is I/O
+- **B3 GPU compression**: not recommended.  Bottleneck is I/O
   + byte-decomposition + container assembly (~70% of wall-clock); no
   GPU-accelerable phase exists.  No drop-in GPU AC library for Python.
 
@@ -1019,9 +1012,9 @@ quantisation.  Documented decisions:
   fall-through, v2 container stamping via codec module, and a guard on
   the size-equivalence finding.
 
-### Research finding (also documented in `A5_DONE.md`)
+### Research finding
 - **A5 does not beat plain BF16 on real Qwen3 weights**, despite the
-  CLAUDE.md spec's prediction of ≥ 0.3 pp improvement. Measured impact on
+  initial prediction of ≥ 0.3 pp improvement. Measured impact on
   Qwen3-8B MLP gate_proj / up_proj / down_proj layers: within 1 KB on
   100 MB tensors (0.0001 % drift). The plain BF16 codec is already at the
   joint-entropy floor (`H(s,e) + H(m|e)`); any partition determined by
@@ -1159,7 +1152,7 @@ quantisation.  Documented decisions:
 
 ### Fixed
 - Test fixtures now use synthetic tensors -- no real model files in repo
-- `*.bs` and `V3_ROADMAP.md` added to .gitignore
+- `*.bs` and internal roadmap markdown added to .gitignore
 # Changelog
 
 ## [2.0.1] - 2026-05-15

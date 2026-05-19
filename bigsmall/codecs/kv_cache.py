@@ -2,8 +2,8 @@
 
 Wraps the existing `bf16` (sign-exp joint AC + per-exp conditional
 mantissa) codec used for model weights. The KV cache on Phi-3.5-mini was
-measured to compress to ~68% of raw BF16 (Step 0 of KV_CACHE_CLAUDE.md),
-matching the weight compression regime. K and V are encoded independently
+measured to compress to ~68% of raw BF16, matching the weight compression
+regime. K and V are encoded independently
 in v1; future work can attempt joint coding if measurable correlation is
 present.
 

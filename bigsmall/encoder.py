@@ -120,8 +120,8 @@ def _encode_worker(job: tuple) -> tuple[int, bytes, str, dict, str | None]:
           A5 (bf16_sparsity_v1) candidate entirely.  When True, A5 is added
           to the BF16 candidate list and the smallest blob wins.
         - enable_gpu_parallel: bool. When True, auto-select additionally
-          tries `bf16_parallel_v1` with a +1pct tolerance safety net (per
-          GPU_KERNEL_CLAUDE.md). Default False.
+          tries `bf16_parallel_v1` with a +1pct tolerance safety net.
+          Default False.
 
     Returns:
         (idx, blob, codec_name, extras, special_label)

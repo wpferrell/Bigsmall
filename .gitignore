@@ -53,8 +53,8 @@ experiments/
 research/
 cc*.py
 ck*.py
-upload_runner.py
-patch_hf_cards.py
+upload_*.py
+patch_hf_*.py
 
 # Credentials/secrets
 .env

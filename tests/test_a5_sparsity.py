@@ -1,6 +1,6 @@
 """A5 sparsity codec tests.
 
-What this file actually proves (read together with `A5_DONE.md`):
+What this file proves:
 
 1. The A5 codec is implemented correctly: every encoded blob decodes
    byte-identically (`md5` verified) on heavy-tailed synthetic tensors and
@@ -12,8 +12,7 @@ What this file actually proves (read together with `A5_DONE.md`):
    the container can be stamped as v2.
 4. The mask-cost vs entropy-savings tradeoff is observable: on a Student-T
    tensor the size delta vs plain bf16 is sub-1 % regardless of threshold,
-   confirming the codec is at the joint-entropy floor (the finding
-   documented in `A5_DONE.md`).
+   confirming the codec is at the joint-entropy floor.
 5. The encoder safety net (`bf16_sparsity_v1` only kept if it produces a
    smaller blob than plain bf16) means A5 cannot cause a *regression* even
    when the heuristic doesn't help.

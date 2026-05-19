@@ -9,8 +9,8 @@ NOTE on performance: the AC codec runs at ~17 MB/s on CPU
 seq=2000 takes ~700ms per tensor. This is unsuitable for live token
 generation in v1 — KV compression is shipped as infrastructure
 (format + correctness) and not wired into the live attention path by
-default. See KV_CACHE_DONE.md for the performance gap and the path to
-making it useful (GPU AC kernel, faster codec).
+default. The path to making it useful runs through a faster codec
+(GPU AC kernel or higher-throughput entropy coder).
 """
 from __future__ import annotations
 

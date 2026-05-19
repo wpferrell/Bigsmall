@@ -3,7 +3,7 @@
 Replaces the encoder's fixed `format -> codec` dispatch with a registry-based
 "try all candidates, keep the smallest" model.
 
-Design constraints (from `B4_CLAUDE.md`):
+Design constraints:
 
 - `auto_select_codec` MUST NEVER produce a blob larger than the previous fixed
   dispatch would have.  Enforced structurally: the previous default codec for
@@ -233,8 +233,8 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
                      by the `enable_a5=False` opt-out on `compress()`).
         enable_fp2_residual: if False, skip the V4 B1 FP2+residual candidate.
         enable_gpu_parallel: when True, additionally try `bf16_parallel_v1`
-            (only for fmt=="bf16"). Per `GPU_KERNEL_CLAUDE.md` spec, the
-            parallel candidate is selected when its size is within
+            (only for fmt=="bf16"). The parallel candidate is selected when
+            its size is within
             `gpu_parallel_tolerance` (default 1%) of the best non-parallel
             candidate. This is a relaxed safety net relative to "smallest
             wins" — the parallel codec is *always* slightly larger but
@@ -373,7 +373,7 @@ def auto_select_codec(raw: bytes, fmt: str, dtype: str,
     # explicitly opted in by the caller. Uses a relaxed safety net (+1pct by
     # default) instead of strict smallest-wins because parallel is *always*
     # slightly larger than the joint-entropy floor — its value is GPU
-    # decodability, not compression ratio. See GPU_KERNEL_CLAUDE.md Step 0.
+    # decodability, not compression ratio.
     if enable_gpu_parallel and fmt == "bf16":
         try:
             par_blob, par_extras = bf16_parallel.encode(

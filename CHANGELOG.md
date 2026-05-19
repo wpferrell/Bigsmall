@@ -1,3 +1,68 @@
+## [3.8.0] - 2026-05-18
+
+v3.8.0 is a **research-only release**. Two compression-ratio improvement
+ideas were investigated; **both decision gates failed**. No code changes
+ship. The findings are documented so future sessions don't re-investigate.
+
+### Idea 1: per-tensor custom exponent remapping → REJECTED
+
+The spec predicted 0.2-0.5pp gain by remapping each tensor's used
+exponent values to a contiguous 0..n_used-1 range. Measurement on Phi-3.5-mini
++ Qwen3-8B shard 1:
+
+- Mean used exponents per tensor: **22.0** (Phi), **22.6** (Qwen3).
+  Range 4-37.
+- Header overhead saving from remapping: **0.00078 pp of raw** (aggregate
+  across 209 BF16 tensors). 125x below the 0.1pp decision gate.
+
+**Why the spec was off by ~250x:** remapping is a *bijection* on the
+symbol alphabet, so `H(remapped_exp) = H(original_exp)` exactly. The
+"savings from `log2(256) → log2(n_used)`" calculation assumes the
+coder allocates fixed bits per alphabet entry — but the existing
+Categorical AC coder is already at Shannon's optimum for the
+underlying distribution regardless of relabelling.
+
+The only real savings come from header overhead reduction (uint16
+indices replaced by uint8). At ~330 bytes per tensor on ~209 tensors,
+that's 68 KB over a 9 GB raw shard = 0.00078pp. Not worth the
+implementation complexity.
+
+### Idea 2: cross-model family pooled entropy → REJECTED
+
+Per spec Step 2: pool SE histograms across all models in a family, code
+each model with the family histogram, save the per-model headers in
+exchange for a KL penalty.
+
+| Family | Models | KL penalty | Header saving (best case) | Net |
+|---|---|---|---|---|
+| Qwen | Qwen2.5-32B + Qwen3-8B | 27.4 MB | 494 B | **−27.4 MB** |
+| Gemma | gemma-3-{4b,12b,27b}-it | 6.6 MB | 1558 B | **−6.6 MB** |
+
+Both families show massive **negative net.** The per-model SE
+distributions differ enough (especially in the rare-exponent tail)
+that the KL penalty dwarfs any header savings. Notable Gemma-family
+observation: H_self across the three sizes is remarkably consistent
+(3.7059–3.7162 bits/sym) yet KL is still ~0.01 bits/sym — the tails
+matter.
+
+This is the same finding pattern as **A2** (cross-tensor shared
+tables within one model) from the V4 lossless research arc.
+
+### Why ship v3.8.0 anyway
+
+The measurement results are documented in two JSON files in `research/`
+(gitignored locally; the findings are encoded in this CHANGELOG entry).
+The next time someone is tempted to try either approach, this entry is
+the answer. Per the spec: "still bump to 3.8.0 with research findings
+documented. The measurement work is valuable even if nothing ships."
+
+### Compatibility
+
+- Zero code changes outside `__version__` bump and CHANGELOG.
+- All 119 tests still pass / 2 skipped.
+- `pip install bigsmall==3.8.0` is functionally identical to 3.7.0 with
+  this CHANGELOG entry attached.
+
 ## [3.7.0] - 2026-05-18
 
 v3.7.0 **unlocks parallel tensor encoding on Windows.** The historical

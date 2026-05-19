@@ -125,10 +125,13 @@ def test_streaming_md5_roundtrip_all_layers(synthetic_bs_dir):
     assert not extra, f"extra tensors: {sorted(extra)[:3]}"
 
 
+@pytest.mark.integration
 def test_streaming_inference_identical_to_full():
     """StreamingGPT2 greedy generation == GPT2LMHeadModel.
 
-    Requires a real GPT-2 in the HF cache. Skipped otherwise.
+    Marked `integration` (v3.11.0): requires a real GPT-2 in the HF cache
+    (~500 MB). Skipped from the default `pytest tests/` run; opt in
+    with `pytest -m integration tests/`.
     """
     src = _gpt2_cached()
     if src is None:

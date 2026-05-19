@@ -17,8 +17,14 @@ def _gpt2_dir() -> Path | None:
     return None
 
 
+@pytest.mark.integration
 def test_gpt2_inference_identical():
-    """Decompressed GPT-2 produces same generations as original."""
+    """Decompressed GPT-2 produces same generations as original.
+
+    Marked `integration` (v3.11.0): requires GPT-2 to be cached locally
+    (~500 MB). Skipped from the default `pytest tests/` run; opt in
+    with `pytest -m integration tests/`.
+    """
     gpt2 = _gpt2_dir()
     if gpt2 is None:
         pytest.skip("GPT-2 not in HF cache")

@@ -1,3 +1,75 @@
+## [3.11.0] - 2026-05-18
+
+v3.11.0 ships **testing infrastructure** — property-based testing,
+multi-platform CI, an integration-test marker so the "GPT-2 needs to be
+cached" tests are properly catalogued instead of silently skipped, and
+two new real-model integration tests.
+
+### Added
+
+- **Property-based testing with Hypothesis** in
+  `tests/test_property_based.py`. Five properties checked on
+  randomly-sampled bf16/fp16/fp32 tensors of 1-3D shapes:
+    1. compress → decompress is byte-identical (md5).
+    2. `auto_select_codec` never returns an unregistered codec name.
+    3. `verify_fast()` passes on every freshly-compressed file.
+    4. Full `verify()` (md5 round-trip) passes on every freshly-compressed
+       file.
+    5. `compress_streaming` output is byte-identical to `compress()`.
+  Tests cap individual tensor size so the full property suite completes
+  in ~16 seconds.
+
+- **`@pytest.mark.integration` marker** registered via `pytest.ini`. The
+  default `pytest tests/` run **excludes** integration tests via
+  `addopts = -m "not integration"`. To run them: `pytest -m integration
+  tests/`. This re-classifies the 2 historically-skipped GPT-2 tests
+  (`test_gpt2_inference_identical`, `test_streaming_inference_identical_to_full`)
+  as integration tests instead of leaving them silently skipped.
+
+- **New real-model integration tests** in `tests/test_integration.py`:
+    - `test_compress_from_hub_gpt2_roundtrip` — exercises the full
+      `compress_from_hub` → `decompress` chain on GPT-2.
+    - `test_verify_full_on_real_model` — `verify()` md5 round-trip on a
+      real GPT-2 compressed file.
+
+- **`.github/workflows/ci.yml`** — multi-platform CI matrix:
+    - OS: ubuntu-latest, windows-latest, macos-latest.
+    - Python: 3.10, 3.11, 3.12.
+    - Steps: install package + test deps, run default test suite (no
+      integration, no GPU via `BIGSMALL_FORCE_CPU=1`), then property
+      tests separately for easy diagnosis if a Hypothesis-only failure
+      occurs.
+
+### Test count changes
+
+| Snapshot | Passed | Skipped | Deselected | Integration |
+|---|---|---|---|---|
+| v3.10.0 | 131 | 2 | 0 | — |
+| **v3.11.0** | **136** | **0** | **4** | 4 |
+
+The two skips that have persisted since v2.x are now properly tagged
+as integration tests. Default `pytest` runs them as "deselected"
+(skipped because of the marker), which is the structurally honest
+classification.
+
+### Compatibility
+- No format changes. No public API changes.
+- All existing tests pass.
+- `hypothesis` is a test-time-only dependency; not added to runtime
+  requirements.
+
+### Deliberate scope notes
+
+- **No decode-speed regression test.** Decode throughput varies
+  significantly across CI hardware (especially Numba JIT cold-start),
+  so a hard speed floor would be flaky. Ratio regression is already
+  covered by `tests/test_codec_regression.py` (locked synthetic baseline,
+  0.05pp tolerance) which is the meaningful invariant.
+- **No GPU tests in CI** — GitHub Actions runners don't have GPUs.
+  GPU/Triton tests skip themselves via `torch.cuda.is_available()`.
+- **Integration tests are deselected, not failed** when not opted in.
+  CI passes cleanly without network access to HF.
+
 ## [3.10.0] - 2026-05-18
 
 v3.10.0 ships **CLI improvements**: new `stat` and `diff` subcommands,

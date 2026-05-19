@@ -20,11 +20,12 @@ def _cmd_compress(args):
     elif args.inference:
         mode = "inference"
 
+    progress = not getattr(args, "no_progress", False)
     t0 = time.perf_counter()
     if args.base:
-        encoder.compress_delta(src, args.base, dst, mode=mode)
+        encoder.compress_delta(src, args.base, dst, mode=mode, progress=progress)
     else:
-        encoder.compress(src, dst, mode=mode)
+        encoder.compress(src, dst, mode=mode, progress=progress)
     elapsed = time.perf_counter() - t0
     src_size = src.stat().st_size
     dst_size = dst.stat().st_size
@@ -44,11 +45,12 @@ def _cmd_decompress(args):
     else:
         dst = src.with_suffix(".safetensors")
 
+    progress = not getattr(args, "no_progress", False)
     t0 = time.perf_counter()
     if args.base:
-        decoder.decompress_delta(src, args.base, dst)
+        decoder.decompress_delta(src, args.base, dst, progress=progress)
     else:
-        decoder.decompress(src, dst)
+        decoder.decompress(src, dst, progress=progress)
     elapsed = time.perf_counter() - t0
     print(f"decompressed {src} -> {dst}  ({elapsed:.1f}s)", flush=True)
 
@@ -112,7 +114,16 @@ def _cmd_info(args):
 
 
 def _cmd_verify(args):
-    from .verify import verify
+    from .verify import verify, verify_fast
+    if args.fast:
+        ok, problems = verify_fast(args.src, verbose=args.verbose)
+        if ok:
+            print("OK", flush=True)
+            sys.exit(0)
+        print("FAIL", flush=True)
+        for p in problems:
+            print(f"  - {p}", flush=True)
+        sys.exit(1)
     ok = verify(args.src, source_safetensors=args.source)
     if ok:
         print("OK", flush=True)
@@ -121,19 +132,259 @@ def _cmd_verify(args):
     sys.exit(1)
 
 
+def _layer_type_from_name(name: str) -> str:
+    """Heuristic bucket label for benchmark / stat per-layer breakdowns."""
+    n = name.lower()
+    if "embed" in n or "wte" in n or "wpe" in n:
+        return "embedding"
+    if "lm_head" in n or "output" in n:
+        return "lm_head"
+    if "norm" in n or "ln_" in n or "layernorm" in n:
+        return "norm"
+    if "q_proj" in n or "k_proj" in n or "v_proj" in n or "qkv" in n:
+        return "attn_qkv"
+    if "o_proj" in n or "out_proj" in n:
+        return "attn_out"
+    if "gate_proj" in n or "up_proj" in n or "gate_up" in n:
+        return "mlp_gate_up"
+    if "down_proj" in n:
+        return "mlp_down"
+    if "mlp" in n:
+        return "mlp_other"
+    if "attn" in n or "attention" in n:
+        return "attn_other"
+    return "other"
+
+
+def _peak_rss_during(fn) -> tuple[float, int]:
+    """Run `fn()` and return (return_value, peak_rss_bytes_during_call)."""
+    import threading
+    try:
+        import psutil
+        proc = psutil.Process()
+        rss_samples = [proc.memory_info().rss]
+        stop = threading.Event()
+
+        def _sample():
+            while not stop.is_set():
+                try:
+                    rss_samples.append(proc.memory_info().rss)
+                except Exception:
+                    pass
+                stop.wait(0.05)
+
+        th = threading.Thread(target=_sample, daemon=True)
+        th.start()
+        try:
+            val = fn()
+        finally:
+            stop.set()
+            th.join(timeout=1.0)
+        return val, max(rss_samples)
+    except ImportError:
+        return fn(), 0
+
+
 def _cmd_benchmark(args):
     from . import encoder, decoder
+    from .container import read_header
     src = Path(args.src)
-    dst = src.with_suffix(".bs")
+    if args.output:
+        dst = Path(args.output)
+    else:
+        dst = src.with_suffix(".bs")
     print(f"Benchmarking {src.name}...")
-    t0 = time.perf_counter(); encoder.compress(src, dst); te = time.perf_counter() - t0
-    t0 = time.perf_counter(); _ = decoder.decompress(dst); td = time.perf_counter() - t0
+
+    # Encode (with peak RSS sampling if psutil available)
+    t0 = time.perf_counter()
+    _, peak_rss_enc = _peak_rss_during(lambda: encoder.compress(src, dst, progress=not args.no_progress))
+    te = time.perf_counter() - t0
+
+    # Decode (with peak RSS sampling)
+    t0 = time.perf_counter()
+    decoded_dict, peak_rss_dec = _peak_rss_during(lambda: decoder.decompress(dst, progress=not args.no_progress))
+    td = time.perf_counter() - t0
+
     src_size = src.stat().st_size
     dst_size = dst.stat().st_size
     pct = (dst_size / src_size * 100) if src_size > 0 else 0
     print(f"  encode:     {te:.1f}s  ({src_size / te / 1024 / 1024:.1f} MiB/s)")
     print(f"  decode:     {td:.1f}s  ({src_size / td / 1024 / 1024:.1f} MiB/s)")
     print(f"  ratio:      {pct:.2f}% ({src_size:,} -> {dst_size:,})")
+    if peak_rss_enc:
+        print(f"  peak RSS:   encode {_fmt_bytes(peak_rss_enc)}   decode {_fmt_bytes(peak_rss_dec)}")
+    else:
+        print(f"  peak RSS:   (install psutil to measure)")
+
+    # Per-layer-type breakdown (uses header to read every tensor's raw +
+    # compressed size, then groups by heuristic layer-type label).
+    if args.detailed or args.no_detail is False:
+        header, _off = read_header(dst)
+        from .container import _dtype_to_format, _tensor_raw_bytes
+        type_stats: dict[str, dict] = {}
+        for t in header["tensors"]:
+            label = _layer_type_from_name(t["name"])
+            raw = _tensor_raw_bytes(t)
+            cmp = t.get("compressed_bytes", 0)
+            d = type_stats.setdefault(label, {"raw": 0, "compressed": 0, "count": 0})
+            d["raw"] += raw
+            d["compressed"] += cmp
+            d["count"] += 1
+        print("  per-layer-type breakdown:")
+        max_lbl = max((len(k) for k in type_stats), default=8)
+        # Sort by largest raw first
+        for label in sorted(type_stats, key=lambda k: -type_stats[k]["raw"]):
+            d = type_stats[label]
+            ratio = (d["compressed"] / d["raw"] * 100) if d["raw"] else 0.0
+            print(
+                f"    {label:<{max_lbl}}  {d['count']:>4}  "
+                f"raw={_fmt_bytes(d['raw']):>10}  "
+                f"cmp={_fmt_bytes(d['compressed']):>10}  "
+                f"ratio={ratio:5.2f}%"
+            )
+
+
+def _cmd_stat(args):
+    """Detailed per-tensor statistics."""
+    from .container import read_header, _tensor_raw_bytes
+    src = Path(args.src)
+    header, _ = read_header(src)
+    tensors = header["tensors"]
+    if args.tensor:
+        tensors = [t for t in tensors if args.tensor in t["name"]]
+        if not tensors:
+            print(f"No tensors matching {args.tensor!r}")
+            sys.exit(1)
+
+    rows = []
+    for t in tensors:
+        raw = _tensor_raw_bytes(t)
+        cmp = t.get("compressed_bytes", 0)
+        ratio = (cmp / raw * 100) if raw else 0.0
+        rows.append({
+            "name": t["name"],
+            "shape": tuple(t.get("shape", [])),
+            "dtype": t.get("dtype", "?"),
+            "codec": t.get("codec", "?"),
+            "raw": raw,
+            "compressed": cmp,
+            "ratio": ratio,
+        })
+
+    key_map = {
+        "ratio": lambda r: r["ratio"],
+        "size": lambda r: -r["compressed"],
+        "name": lambda r: r["name"],
+    }
+    sort_key = key_map.get(args.sort, key_map["ratio"])
+    rows.sort(key=sort_key)
+    if args.reverse:
+        rows.reverse()
+
+    # Print table
+    name_w = min(60, max(len("tensor"), max((len(r["name"]) for r in rows), default=6)))
+    codec_w = max(len("codec"), max((len(r["codec"]) for r in rows), default=5))
+    print(f"  {'#':>4}  {'name':<{name_w}}  {'shape':<20}  {'dtype':<7}  "
+          f"{'codec':<{codec_w}}  {'raw':>10}  {'cmp':>10}  {'ratio':>7}")
+    for i, r in enumerate(rows):
+        shape_s = str(r["shape"]).replace(" ", "")
+        if len(shape_s) > 19:
+            shape_s = shape_s[:16] + "..."
+        n = r["name"]
+        if len(n) > name_w:
+            n = n[:name_w - 3] + "..."
+        print(
+            f"  {i:>4}  {n:<{name_w}}  {shape_s:<20}  "
+            f"{r['dtype']:<7}  {r['codec']:<{codec_w}}  "
+            f"{_fmt_bytes(r['raw']):>10}  {_fmt_bytes(r['compressed']):>10}  "
+            f"{r['ratio']:6.2f}%"
+        )
+
+    # Summary
+    total_raw = sum(r["raw"] for r in rows)
+    total_cmp = sum(r["compressed"] for r in rows)
+    overall = (total_cmp / total_raw * 100) if total_raw else 0.0
+    print()
+    print(f"  tensors:    {len(rows)}")
+    print(f"  total raw:  {_fmt_bytes(total_raw)} ({total_raw:,} bytes)")
+    print(f"  total cmp:  {_fmt_bytes(total_cmp)} ({total_cmp:,} bytes)")
+    print(f"  overall:    {overall:.2f}%")
+    # Codec breakdown
+    codec_counts: dict[str, int] = {}
+    for r in rows:
+        codec_counts[r["codec"]] = codec_counts.get(r["codec"], 0) + 1
+    print("  codecs:")
+    for c, n in sorted(codec_counts.items(), key=lambda x: -x[1]):
+        print(f"    {c:<24}  {n} tensor(s)")
+
+
+def _cmd_diff(args):
+    """Diff two .bs files — show added / removed / changed tensors."""
+    from .container import read_header
+    a = Path(args.file_a)
+    b = Path(args.file_b)
+    ha, _ = read_header(a)
+    hb, _ = read_header(b)
+    by_a = {t["name"]: t for t in ha["tensors"]}
+    by_b = {t["name"]: t for t in hb["tensors"]}
+
+    only_a = sorted(set(by_a) - set(by_b))
+    only_b = sorted(set(by_b) - set(by_a))
+    common = sorted(set(by_a) & set(by_b))
+
+    changed: list[dict] = []
+    same_count = 0
+    for name in common:
+        ta, tb = by_a[name], by_b[name]
+        if ta.get("compressed_bytes") != tb.get("compressed_bytes") \
+                or ta.get("md5") != tb.get("md5"):
+            changed.append({
+                "name": name,
+                "a_cmp": ta.get("compressed_bytes", 0),
+                "b_cmp": tb.get("compressed_bytes", 0),
+                "a_md5": (ta.get("md5") or "")[:12],
+                "b_md5": (tb.get("md5") or "")[:12],
+            })
+        else:
+            same_count += 1
+
+    print(f"A: {a}")
+    print(f"B: {b}")
+    print()
+    print(f"  identical:  {same_count}")
+    print(f"  changed:    {len(changed)}")
+    print(f"  only in A:  {len(only_a)}")
+    print(f"  only in B:  {len(only_b)}")
+
+    if only_a:
+        print()
+        print("  Removed (in A, not B):")
+        for name in only_a[:50]:
+            print(f"    - {name}")
+        if len(only_a) > 50:
+            print(f"    ... and {len(only_a) - 50} more")
+    if only_b:
+        print()
+        print("  Added (in B, not A):")
+        for name in only_b[:50]:
+            print(f"    + {name}")
+        if len(only_b) > 50:
+            print(f"    ... and {len(only_b) - 50} more")
+    if changed:
+        print()
+        print("  Changed (in both, different content):")
+        for c in changed[:50]:
+            diff = c["b_cmp"] - c["a_cmp"]
+            sign = "+" if diff >= 0 else ""
+            print(f"    ~ {c['name']}  cmp {c['a_cmp']}→{c['b_cmp']} ({sign}{diff})  "
+                  f"md5 {c['a_md5']}..→{c['b_md5']}..")
+        if len(changed) > 50:
+            print(f"    ... and {len(changed) - 50} more")
+
+    # Exit code: 0 if identical, 1 if any difference
+    if only_a or only_b or changed:
+        sys.exit(1)
+    sys.exit(0)
 
 
 def _cmd_migrate(args):
@@ -384,6 +635,7 @@ def main(argv=None):
     c.add_argument("src")
     c.add_argument("-o", "--output", default=None)
     c.add_argument("--base", default=None, help="Base safetensors path - enables delta mode")
+    c.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bar")
     grp = c.add_mutually_exclusive_group()
     grp.add_argument("--storage", action="store_true", help="Maximum compression mode")
     grp.add_argument("--balanced", action="store_true", help="Balanced ratio+speed (default)")
@@ -394,20 +646,54 @@ def main(argv=None):
     d.add_argument("src")
     d.add_argument("-o", "--output", default=None)
     d.add_argument("--base", default=None, help="Base file path for delta decompression")
+    d.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bar")
     d.set_defaults(func=_cmd_decompress)
 
     i = sub.add_parser("info", help="Show metadata for a .bs file")
     i.add_argument("src")
     i.set_defaults(func=_cmd_info)
 
-    v = sub.add_parser("verify", help="Verify md5 round-trip of a .bs file")
+    v = sub.add_parser("verify",
+                       help="Verify a .bs file (md5 round-trip; use --fast for header-only)")
     v.add_argument("src")
-    v.add_argument("--source", default=None, help="Compare against original .safetensors")
+    v.add_argument("--source", default=None,
+                   help="Compare against original .safetensors")
+    v.add_argument("--fast", action="store_true",
+                   help="Header-only integrity check (offsets, codecs, "
+                        "no decompression). Runs in seconds even on multi-GB shards.")
+    v.add_argument("--verbose", action="store_true",
+                   help="Print extra detail in --fast mode")
     v.set_defaults(func=_cmd_verify)
 
     b = sub.add_parser("benchmark", help="Encode/decode benchmark for a model")
     b.add_argument("src")
+    b.add_argument("-o", "--output", default=None,
+                   help="Write the .bs to this path (default: alongside src)")
+    b.add_argument("--no-progress", action="store_true",
+                   help="Disable tqdm progress bar")
+    b.add_argument("--no-detail", action="store_true",
+                   help="Skip the per-layer-type breakdown table")
+    b.add_argument("--detailed", action="store_true",
+                   help="(default) Include per-layer-type breakdown")
     b.set_defaults(func=_cmd_benchmark)
+
+    st = sub.add_parser("stat",
+                        help="Detailed per-tensor statistics for a .bs file")
+    st.add_argument("src")
+    st.add_argument("--tensor", default=None,
+                    help="Filter to tensors whose name contains this substring")
+    st.add_argument("--sort", default="ratio",
+                    choices=("ratio", "size", "name"),
+                    help="Sort key for the table (default: ratio)")
+    st.add_argument("--reverse", action="store_true",
+                    help="Reverse the sort order")
+    st.set_defaults(func=_cmd_stat)
+
+    df = sub.add_parser("diff",
+                        help="Compare two .bs files — show added/removed/changed tensors")
+    df.add_argument("file_a")
+    df.add_argument("file_b")
+    df.set_defaults(func=_cmd_diff)
 
     s = sub.add_parser("status", help="List BigSmall repos on HuggingFace")
     s.add_argument("--user", default="wpferrell", help="HF username (default: wpferrell)")

@@ -1,3 +1,69 @@
+## [3.10.0] - 2026-05-18
+
+v3.10.0 ships **CLI improvements**: new `stat` and `diff` subcommands,
+a fast `verify --fast` mode that runs in seconds even on multi-GB shards,
+a richer `benchmark` with per-layer-type breakdown, and `--no-progress`
+on the IO-heavy commands.
+
+### Added
+
+- **`bigsmall verify --fast`** — header-only integrity check that runs in
+  seconds. Validates: container header parses, every blob's
+  `(offset, compressed_bytes)` falls inside the data section, no blob
+  pairs overlap (excluding tied_ref aliases), every codec name is
+  registered, and (if present) `bigsmall.index.json` is consistent with
+  the container. Useful as a CI smoke-check before the slower
+  md5-round-trip `verify`. `--verbose` adds tensor/byte counters on the
+  pass path.
+
+- **`bigsmall stat <file.bs>`** — detailed per-tensor table:
+  name, shape, dtype, codec, raw size, compressed size, ratio. Plus a
+  summary footer (total raw / compressed / overall ratio / codec breakdown).
+  Flags: `--tensor <substring>` filters; `--sort {ratio,size,name}`
+  picks the sort key (default `ratio`); `--reverse` flips order.
+
+- **`bigsmall diff <a.bs> <b.bs>`** — three-way structural diff:
+  identical / changed / only-in-A / only-in-B, with first-50-each
+  preview. Exit code 0 if identical, 1 if any difference. Compares
+  `compressed_bytes` + per-tensor `md5` from the headers — does not
+  decompress. Useful for fine-tune delta inspection and checkpoint
+  comparisons.
+
+- **`bigsmall benchmark` enhancements** — adds an
+  `-o/--output` flag (so you can write the test .bs anywhere), a
+  per-layer-type breakdown table (attn_qkv / attn_out / mlp_gate_up /
+  mlp_down / norm / embedding / lm_head / other), and a peak-RSS
+  measurement during encode + decode (when `psutil` is installed).
+  Suppress the breakdown with `--no-detail`.
+
+- **`--no-progress` flag** on `compress`, `decompress`, and `benchmark`.
+  Forwarded to the existing `progress=` argument on
+  `compress / decompress / decompress_delta`. Default behaviour is
+  unchanged (progress bars on by default if tqdm is installed).
+
+### Implementation note: `verify_fast` is also available programmatically
+
+```python
+from bigsmall.verify import verify_fast
+ok, problems = verify_fast("model.bs")
+if not ok:
+    for p in problems:
+        print(p)
+```
+
+### Tests
+- `tests/test_opt_step7.py` — 7 new tests covering all four CLI features:
+  valid/corrupt verify-fast, stat tensor count + filter, diff
+  added/removed/changed, diff-identical exit-zero, benchmark
+  end-to-end + breakdown table.
+- **131 passed / 2 skipped** total (up from 124).
+
+### Compatibility
+- No format changes. All existing `.bs` files work with all new commands.
+- Existing CLI commands (`compress`, `decompress`, `info`, `migrate`,
+  `pipeline`, `status`) unchanged on default flags.
+- `verify` without `--fast` is unchanged (full md5 round-trip).
+
 ## [3.9.0] - 2026-05-18
 
 v3.9.0 ships **streaming-compression infrastructure** + a handful of

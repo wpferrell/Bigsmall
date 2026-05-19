@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20279248.svg)](https://doi.org/10.5281/zenodo.20279248)
+
 # BigSmall
 
 **Lossless neural network weight compression. 34% smaller files, bit-identical weights.**

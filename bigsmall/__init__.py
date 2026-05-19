@@ -36,6 +36,7 @@ from .integrations.vllm import (
     bigsmall_vllm_serve as vllm_serve,
 )
 from .streaming import StreamingLoader
+from .streaming_inference import BigSmallStreamingModel
 
 __all__ = [
     "compress",
@@ -57,6 +58,7 @@ __all__ = [
     "vllm_decompress",
     "vllm_serve",
     "StreamingLoader",
+    "BigSmallStreamingModel",
     "BigSmallVersionError",
     "__version__",
 ]

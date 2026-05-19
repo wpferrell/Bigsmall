@@ -15,6 +15,10 @@ setup(
     author="Will Ferrell",
     author_email="wpferrell@gmail.com",
     url="https://github.com/wpferrell/Bigsmall",
+    project_urls={
+        "Paper": "https://doi.org/10.5281/zenodo.20279248",
+        "Bug Tracker": "https://github.com/wpferrell/Bigsmall/issues",
+    },
     license="Elastic-2.0",
     python_requires=">=3.9",
     packages=find_packages(include=["bigsmall", "bigsmall.*"]),

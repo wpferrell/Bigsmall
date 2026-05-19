@@ -1,5 +1,8 @@
 # Contributing to BigSmall
 
+**Paper:** [Paper (Zenodo)](https://doi.org/10.5281/zenodo.20279248)
+
+
 Thanks for your interest in BigSmall. This document describes how to set up a
 development environment, how the codebase is laid out, and the conventions we
 follow when adding codecs, integrations, or fixing bugs.
@@ -134,4 +137,4 @@ your source file. That's the fastest signal we have.
 ## License
 
 By contributing you agree that your contributions are licensed under
-Apache 2.0, the same license as the rest of the project.
+Elastic License 2.0 (ELv2). See LICENSING.md for details.

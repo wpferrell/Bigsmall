@@ -1,3 +1,5 @@
+**Paper:** [Paper (Zenodo)](https://doi.org/10.5281/zenodo.20279248)
+
 ## [3.12.0] - 2026-05-18
 
 v3.12.0 ships **binary index encoding** for fast tensor lookup on large
